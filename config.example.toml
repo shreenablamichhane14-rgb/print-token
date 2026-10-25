@@ -1,0 +1,36 @@
+# Print Token settings. Copy to config.toml (which git ignores) and edit.
+# No secrets in this file. Every *_env entry is the NAME of a key in ~/.env.
+
+# Exact printer name, or "DRYRUN" to test without paper.
+#   Windows: the name in Settings > Printers. DRYRUN prints into PDFs under data/dryrun through
+#            Microsoft Print to PDF. Never rely on the default printer, Windows can change it.
+#   Linux (Raspberry Pi): the CUPS queue name from `lpstat -e`. DRYRUN saves the PDF instead.
+printer = "DRYRUN"
+data_dir = "data"
+
+[telegram]
+token_env = "PRINT_TOKEN_BOT_TOKEN"        # bot made with @BotFather, used by this program only
+allowed_ids_env = "PRINT_TOKEN_ALLOWED_IDS" # comma separated numeric Telegram user ids
+notify_chat_env = "PRINT_TOKEN_NOTIFY_CHAT" # where results and email rejections get reported
+pin_hash_env = "PRINT_TOKEN_PIN_HASH"      # written by: python -m printtoken setpin
+
+[mail]
+enabled = false                            # turn on once the mailbox below is set up
+imap_host = "imap.gmail.com"
+user_env = "PRINT_TOKEN_GMAIL"             # a Gmail account used only for printing
+password_env = "PRINT_TOKEN_GMAIL_APP_PASSWORD"  # a Google App Password, not the account password
+poll_seconds = 30
+dmarc_accept = ["pass"]                    # Gmail writes pass/fail/none; "bestguesspass" is a Microsoft label
+sender_allowlist = []                      # empty = any sender that passes DMARC
+
+[limits]
+token_ttl_min = 30
+max_outstanding = 3
+mints_per_hour = 3
+pin_failures_per_hour = 5
+prints_per_hour = 20
+page_cap = 20
+max_mb_telegram = 20                       # Telegram's own limit for bot downloads
+max_mb_mail = 25                           # Gmail's attachment limit
+queue_size = 10
+workers = 2

@@ -1,0 +1,12 @@
+# runtime data: the database, logs, dry run output and any test documents
+data/
+# machine-specific settings (copy config.example.toml)
+config.toml
+# local notes for the AI assistant, not part of the project
+CLAUDE.md
+AGENTS.md
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+*.env
