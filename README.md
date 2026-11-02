@@ -21,7 +21,13 @@ stay on all the time.
 ```
 
 - **Telegram:** an allowlisted Telegram account sends a PDF, PNG, JPEG or .txt *as a file* and it
-  prints. Messages from anybody else get no reply at all.
+  prints. Messages from anybody else get no reply at all, unless they carry a guest key (below).
+- **Typed notes:** plain text typed into the bot is tidied into a clean page (a short first line
+  on its own becomes the title, `- ` and `1. ` lines stay a list, lines pressed apart by the phone
+  are joined back) and laid out by PyMuPDF's Story engine in a Times-style serif (Nimbus Roman)
+  with 1 inch margins and a page footer. The bot keeps it as a draft for 10 minutes and nothing
+  prints until `/go` (`/cancel` drops it), so a stray message never prints by itself. A `.txt`
+  sent as a file keeps the monospaced layout, which suits code and logs.
 - **Email (when enabled):** `/print <PIN>` in Telegram returns an address `box+<tag>@gmail.com`
   that works for one email within 30 minutes. The gateway reads new mail headers every 30 s,
   downloads a message only if it went to a `+tag` address, and then decides in this order: the tag
@@ -43,6 +49,62 @@ stay on all the time.
 | Addresses | `/print` needs a PIN, 5 wrong tries locks it for an hour | 30 minutes, one use, 3 live at most, 3 new per hour |
 | Files | PDF, PNG, JPEG, plain text only (detected from the bytes); 20 MB | same types; 25 MB; at most 5 attachments |
 | Volume | 20 prints an hour, 20 pages per file, queue of 10 | same limits, same queue |
+| Guest key | one outside person redeems a 12-character key (60 bits) once; 10 wrong keys from one account, then an hour of silence; answers to a guest's chatter: 6 an hour | the same key as `box+<key>@gmail.com`, one attachment, DMARC still required, the sender allowlist not applied |
+| Guest volume | 2 live keys, 7 days, one print of 5 pages, 5 guest prints an hour on their own budget, 10 files an hour looked at per guest account, 3 failed prints close the key | same key, same page cap, the shared hourly print limit |
+
+## Guest key
+
+A guest key lets one outside person print one thing, once, without being on the allowlist and
+without the owner handling the file. It is 12 characters from the same alphabet as the email tags
+(60 bits, no 0, 1, 8 or 9), shown as `PT-ABCD-EFGH-IJKL`, and it works on both channels:
+whichever one prints first spends it.
+
+**Issuing one.** In Telegram, `/invite <PIN> <note>` (the note is for the owner only: say who the
+key is for). The bot deletes the message with the PIN and sends two replies: a block to forward to
+the guest exactly as it is (the key as a tap-to-copy code span, a `t.me/<bot>?start=<key>` link
+that hands the key over when the guest presses Start, the expiry, and the email address once mail
+is on), then an owner-only note. The bot removes its own copy of the block once the key is claimed
+or finished (Telegram allows that for 48 hours). Without a PIN on the gateway,
+`python -m printtoken guest --note "..."` prints the same block on the laptop. `guests` lists the
+keys with their state (live, claimed, printing, used, expired) and `revoke` closes one early, given
+the full key or just the first characters `guests` shows (the full key is shown only once).
+
+**What the guest sees.** Nothing until they send the key: a stranger's messages get silence, as
+before. The key is found inside whatever they send (the forwarded invite, the deep link's `/start`
+payload, a key with a sentence around it, en dashes, a trailing period, a `0` typed for `O`). A
+right key is deleted from the chat and answered with what to send next, and the owner is told who
+claimed it. Then one file, as a File or as a photo. Word files are turned away before the key is
+touched, with instructions to export a PDF. The guest gets "Got <name>, checking it now" and then
+either the result or what went wrong plus the fact that the key is still unused. The owner gets a
+message for the claim, for the print or the failure, and when a flood of wrong keys or of files
+locks an account.
+
+**Limits.** 2 live keys, 7 days each, one print of up to 5 pages (never more than the owner's own
+cap), 5 guest prints an hour on a budget separate from the owner's, 3 failed prints close a key,
+10 wrong keys from one account mean an hour of silence (the owner is told once), and 10 files an
+hour from one guest account, printable or not, after which its files are ignored for the rest of
+the hour (the owner is told once, so the key can be revoked). A key held by a print that a crash
+cut off is released at the next start. Keys reach the event log only as their first four
+characters. Five of these settings live under `[guest]` in `config.toml`: `enabled`, `key_days`
+(7), `max_live` (2), `page_cap` (5) and `bad_keys_per_hour` (10). The other four are constants at
+the top of `printtoken/telegram.py`, not config: `GUEST_PRINTS_PER_HOUR` (5),
+`GUEST_REPLIES_PER_HOUR` (6, answers to chatter), `GUEST_FILES_PER_HOUR` (10) and
+`GUEST_FAILURES_PER_KEY` (3). `enabled = false` turns the whole thing off, including keys already
+issued.
+
+**By email, once mail is on.** The invite also carries `box+<12 characters>@gmail.com`. The guest
+emails the file from their own address (Gmail's `dmarc=pass` is still required; the sender
+allowlist is not applied to a guest key), one attachment, and gets no email back: the owner's
+Telegram gets the confirmation. A key mid-print on one channel is refused on the other with
+`key_in_use`.
+
+**Before a guest tries it.** 1. `python -m printtoken setpin` once (`/invite` needs it).
+2. `python -m printtoken tgsetup` after this change, so the new description and the per-chat
+command menu are live (strangers see no commands). 3. `python -m printtoken run`, and keep the
+machine awake until the guest is done, or run it on the Pi. 4. `/invite PIN note`, forward the
+first reply. 5. Expect two messages: claimed, then printed. If neither comes, run
+`python -m printtoken report --days 1` and look for `guest` events. On the Pi, check `timedatectl`
+first: the expiry times in the messages use the machine's own time zone.
 
 ## Setup
 
@@ -54,13 +116,14 @@ stay on all the time.
    `PRINT_TOKEN_ALLOWED_IDS` and `PRINT_TOKEN_NOTIFY_CHAT` (your numeric Telegram id).
    For email later: `PRINT_TOKEN_GMAIL` and `PRINT_TOKEN_GMAIL_APP_PASSWORD` (a Google App
    Password for a Gmail account used only for printing), then `enabled = true` under `[mail]`.
-4. `python -m printtoken setpin` (only needed for email; stores a salted scrypt hash, never the PIN).
+4. `python -m printtoken setpin` (needed for `/print` and `/invite`; stores a salted scrypt hash, never the PIN).
 5. `python -m printtoken selftest`, then `python -m printtoken tgsetup` (bot name and menu) and
    `python -m printtoken tgtest` (live round trip through Telegram, finished with a dry run).
 6. `python -m printtoken run`
 
-Other commands: `dryrun FILE`, `mint` (local address, email testing), `report [--days N] [--csv out.csv]`.
-Tests: `python -m pytest -p no:faulthandler` (61 tests).
+Other commands: `dryrun [--note] FILE`, `mint` (local address, email testing),
+`guest [--days N] [--note TEXT]`, `guests`, `revoke KEY`, `report [--days N] [--csv out.csv]`.
+Tests: `python -m pytest -p no:faulthandler` (139 tests).
 
 ## Pitfalls for whoever works on this next
 
@@ -87,6 +150,9 @@ Tests: `python -m pytest -p no:faulthandler` (61 tests).
     handled COM error inside Microsoft Print to PDF; run with `-p no:faulthandler`.
 14. **Several Pythons on one PC.** `python` and `py` can open different versions, and packages
     installed for one are missing from another (`ModuleNotFoundError`). Check `python --version`.
+15. **PyMuPDF `Story.place()` hands back the same content until `draw()` runs for that page.** A
+    loop that only places to count the pages first never finishes; keep the place, draw, end_page
+    shape in `notes.py`.
 
 ## Threat model
 
@@ -99,10 +165,10 @@ property is claimed.
 ## Layout
 
 ```
-printtoken/   config.py store.py tokens.py pins.py mailparse.py policy.py convert.py printer.py
+printtoken/   config.py store.py tokens.py pins.py mailparse.py policy.py convert.py notes.py printer.py
               pipeline.py telegram.py mailwatch.py messages.py report.py app.py __main__.py
-tests/        61 tests: tokens, mail parsing and policy, the mailbox, conversion and printing
-              (Windows and CUPS), blocking, the bot
+tests/        139 tests: tokens and guest keys, mail parsing and policy, the mailbox, conversion and
+              printing (Windows and CUPS), typed notes, blocking, the bot and the command line
 data/         (git-ignored) printtoken.db, printtoken.log, dryrun/
 ```
 

@@ -44,6 +44,11 @@ class Config:
     max_bytes_mail: int = 25 * 1024 * 1024
     queue_size: int = 10
     workers: int = 2
+    guest_enabled: bool = True
+    guest_key_days: int = 7
+    guest_max_live: int = 2
+    guest_page_cap: int = 5
+    guest_bad_keys_per_hour: int = 10
 
     @property
     def mail_local(self) -> str:
@@ -80,6 +85,7 @@ def load(config_path: Path | str | None = None, env_path: Path | str | None = No
         raw = tomllib.load(fh)
     env = dotenv_values(env_path) if env_path.exists() else {}
     tg, mail, lim = raw.get("telegram", {}), raw.get("mail", {}), raw.get("limits", {})
+    gst = raw.get("guest", {})          # absent in older config files, so every field has a default
 
     def secret(section: dict, field_name: str, required: bool = need_secrets) -> str:
         key = section.get(field_name)
@@ -119,4 +125,9 @@ def load(config_path: Path | str | None = None, env_path: Path | str | None = No
         max_bytes_mail=int(lim.get("max_mb_mail", 25)) * 1024 * 1024,
         queue_size=int(lim.get("queue_size", 10)),
         workers=int(lim.get("workers", 2)),
+        guest_enabled=bool(gst.get("enabled", True)),
+        guest_key_days=int(gst.get("key_days", 7)),
+        guest_max_live=int(gst.get("max_live", 2)),
+        guest_page_cap=int(gst.get("page_cap", 5)),
+        guest_bad_keys_per_hour=int(gst.get("bad_keys_per_hour", 10)),
     )

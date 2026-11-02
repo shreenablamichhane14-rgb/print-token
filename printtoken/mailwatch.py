@@ -22,7 +22,7 @@ from .messages import describe, should_notify_mail
 from .pipeline import Pipeline, PrintJob
 from .policy import RateLimiter, decide_mail
 from .store import Store
-from .tokens import Tokens
+from .tokens import Tokens, mask
 
 log = logging.getLogger("printtoken.mail")
 
@@ -184,19 +184,24 @@ class MailWatcher:
             await self.notify_owner(f"Rejected an email to a print address: {describe('oversize')}.")
             return
         mail = await asyncio.to_thread(mailparse.parse, item.raw, self.cfg.mail_local, self.cfg.mail_domain)
-        decision = decide_mail(mail, self.tokens, self.cfg.dmarc_accept, self.cfg.sender_allowlist)
+        decision = decide_mail(mail, self.tokens, self.cfg.dmarc_accept, self.cfg.sender_allowlist,
+                               guest_enabled=self.cfg.guest_enabled)
         common = dict(channel="email", sender=mail.from_addr, sent_ts=mail.date_ts,
                       received_ts=item.internal_ts, picked_ts=item.picked_ts)
         auth = ",".join(f"{k}={v}" for k, v in sorted(mail.auth.items())) or "none"
         if not decision.ok:
             self.store.log_event(kind="mail", outcome="rejected", reason=decision.reason,
-                                 detail=f"tag={decision.tag} auth={auth}", **common)
+                                 detail=f"tag={mask(decision.tag)} auth={auth}", **common)
             if should_notify_mail(decision.reason):
                 await self.notify_owner(f"Rejected an email from {mail.from_addr or 'an unknown sender'}: "
                                         f"{describe(decision.reason)}.")
             return
         self.store.log_event(kind="mail", outcome="accepted", reason="accepted",
-                             detail=f"tag={decision.tag} auth={auth} files={len(decision.files)}", **common)
+                             detail=f"tag={mask(decision.tag)} auth={auth} files={len(decision.files)}"
+                                    + (" guest=yes" if decision.guest else ""), **common)
+        if decision.guest:
+            await self._guest_mail(mail, item, decision, common)
+            return
         for att in decision.files:
             if not self.limiter.allow():
                 self.store.log_event(kind="print", outcome="rejected", reason="rate_limited",
@@ -209,3 +214,24 @@ class MailWatcher:
             if not self.pipeline.submit(job):
                 await self.notify_owner(f"Email from {mail.from_addr}: {att.filename} skipped, "
                                         f"{describe('queue_full')}.")
+
+    async def _guest_mail(self, mail, item: FetchedMail, decision, common: dict) -> None:
+        """The one attachment on a guest key. decide_mail already holds the key; it is let go
+        again here if the file cannot even be queued, and spent or released by the bot's result
+        handler exactly like a guest print from Telegram."""
+        att = decision.files[0]
+        tag = decision.tag
+        if not self.limiter.allow():
+            self.tokens.release(tag)
+            self.store.log_event(kind="print", outcome="rejected", reason="rate_limited",
+                                 filename=att.filename, **common)
+            await self.notify_owner(f"Guest key email from {mail.from_addr}: {att.filename} skipped, "
+                                    f"{describe('rate_limited')}. The key is open again.")
+            return
+        job = PrintJob(channel="email", sender=f"guest:mail:{mail.from_addr}", filename=att.filename,
+                       data=att.data, sent_ts=mail.date_ts, received_ts=item.internal_ts,
+                       picked_ts=item.picked_ts, page_cap=self.cfg.guest_page_cap, guest_tag=tag)
+        if not self.pipeline.submit(job):
+            self.tokens.release(tag)
+            await self.notify_owner(f"Guest key email from {mail.from_addr}: {att.filename} skipped, "
+                                    f"{describe('queue_full')}. The key is open again.")

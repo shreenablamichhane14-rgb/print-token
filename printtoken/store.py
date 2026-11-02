@@ -11,13 +11,26 @@ import threading
 import time
 from pathlib import Path
 
-SCHEMA = """
+# Token columns added after the first release, defined once: the CREATE TABLE below uses them for
+# a fresh database and Store.__init__ adds whichever ones an older database is missing.
+TOKEN_COLUMNS = {
+    "kind": "TEXT NOT NULL DEFAULT 'mail'",     # 'mail' for an address, 'guest' for a key
+    "note": "TEXT",                             # who a guest key is for, typed by the owner
+    "claimed_by": "TEXT",                       # tg:<id> or mail:<address> that redeemed a guest key
+    "claimed": "REAL",
+    "reserved": "REAL",                         # set while a guest key's one print is in progress
+    "invite_msg": "TEXT",                       # chat:message_id of the /invite reply, cleared once claimed
+}
+_TOKEN_EXTRA = ",\n    ".join(f"{name} {decl}" for name, decl in TOKEN_COLUMNS.items())
+
+SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS tokens(
     tag TEXT PRIMARY KEY,
     created REAL NOT NULL,
     expires REAL NOT NULL,
     used REAL,
-    minted_by TEXT
+    minted_by TEXT,
+    {_TOKEN_EXTRA}
 );
 CREATE TABLE IF NOT EXISTS events(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -54,7 +67,21 @@ class Store:
         self._db = sqlite3.connect(str(path), check_same_thread=False, isolation_level=None)
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.executescript(SCHEMA)
+        self._migrate_tokens()
         self._lock = threading.Lock()
+
+    def _migrate_tokens(self) -> None:
+        """An older database has only the first five token columns; add the rest in place."""
+        have = {row[1] for row in self._db.execute("PRAGMA table_info(tokens)")}
+        for name, decl in TOKEN_COLUMNS.items():
+            if name in have:
+                continue
+            try:
+                self._db.execute(f"ALTER TABLE tokens ADD COLUMN {name} {decl}")
+            except sqlite3.OperationalError as exc:
+                # Two commands (run and guests, say) can open the same file in the same moment.
+                if "duplicate column" not in str(exc):
+                    raise
 
     def write(self, sql: str, args: tuple = ()) -> tuple[int, int]:
         """Run a statement and return (rowcount, lastrowid)."""

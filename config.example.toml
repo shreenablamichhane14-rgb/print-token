@@ -34,3 +34,10 @@ max_mb_telegram = 20                       # Telegram's own limit for bot downlo
 max_mb_mail = 25                           # Gmail's attachment limit
 queue_size = 10
 workers = 2
+
+[guest]
+enabled = true                             # one-time keys for one outside person (/invite in Telegram)
+key_days = 7                               # how long an unused key waits to be redeemed
+max_live = 2                               # unused keys at any one time
+page_cap = 5                               # pages a guest print may have (never more than limits.page_cap)
+bad_keys_per_hour = 10                     # wrong keys from one Telegram account before an hour of silence

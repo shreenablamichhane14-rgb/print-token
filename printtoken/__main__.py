@@ -2,11 +2,15 @@
 
     python -m printtoken run              start the gateway
     python -m printtoken selftest         check printer, mailbox and bot without printing anything
-    python -m printtoken setpin           set the /print PIN (stores only a hash in ~/.env)
+    python -m printtoken setpin           set the PIN for /print and /invite (stores only a hash in ~/.env)
     python -m printtoken tgsetup          give the bot its name, description and command menu
     python -m printtoken tgtest           live Telegram round trip, finished with a dry run print
     python -m printtoken mint             make a print address locally (for testing the email path)
-    python -m printtoken dryrun FILE      convert FILE and "print" it to a PDF in data/dryrun
+    python -m printtoken guest            make a one-time guest key locally [--days N] [--note TEXT]
+    python -m printtoken guests           list guest keys with their state
+    python -m printtoken revoke KEY       close a guest key early (the key, or the first characters guests shows)
+    python -m printtoken dryrun [--note] FILE   convert FILE (or lay it out as a typed note) and "print"
+                                          it to a PDF in data/dryrun
     python -m printtoken report [--csv]   the measurement summary
 """
 from __future__ import annotations
@@ -28,20 +32,28 @@ from .pins import make_hash
 from .printer import DRYRUN, PrinterError, make_printer
 from .report import export_csv, summary
 from .store import Store
-from .tokens import MintRefused, Tokens
+from .tokens import KEY_LEN, KeyRecord, MintRefused, Tokens, display_key, mask, normalise
 
 BOT_NAME = "Print Token"
-BOT_DESCRIPTION = ("Send me a PDF, picture or text file as a File and I print it at home. "
-                   "Only works for allowed accounts.")
-BOT_SHORT = "Prints files at home. Private bot."
+# What a guest reads before pressing Start, so it has to make sense to someone holding a key.
+BOT_DESCRIPTION = ("Prints files on the owner's home printer. If the owner gave you a key, press Start, "
+                   "send the key here, then send your file as a File.")
+BOT_SHORT = "Prints files at home. Needs a key from the owner."
 
 
-def bot_commands(mail_enabled: bool) -> list[dict]:
+def bot_commands(mail_enabled: bool, guest_enabled: bool = True) -> list[dict]:
     commands = [{"command": "status", "description": "Queue and printer"},
                 {"command": "help", "description": "How to use this bot"}]
+    if guest_enabled:
+        commands.insert(0, {"command": "invite", "description": "One-time guest key (needs PIN)"})
     if mail_enabled:
         commands.insert(0, {"command": "print", "description": "One-time email address (needs PIN)"})
     return commands
+
+
+def _tokens_for(cfg: Config) -> tuple[Store, Tokens]:
+    store = Store(cfg.data_dir / "printtoken.db")
+    return store, Tokens(store, cfg.token_ttl_min, cfg.max_outstanding, cfg.mints_per_hour, cfg.guest_max_live)
 
 
 def cmd_run(args) -> int:
@@ -90,8 +102,9 @@ def cmd_selftest(args) -> int:
     except Exception as exc:
         result("bot token", False, exc.__class__.__name__)
     result("allowlist", bool(cfg.allowed_tg_ids), f"{len(cfg.allowed_tg_ids)} Telegram id(s)")
-    if cfg.mail_enabled:
-        result("PIN set for /print", bool(cfg.pin_hash), "" if cfg.pin_hash else "run: python -m printtoken setpin")
+    if cfg.mail_enabled or cfg.guest_enabled:
+        result("PIN set for /print and /invite", bool(cfg.pin_hash),
+               "" if cfg.pin_hash else "run: python -m printtoken setpin")
     print("ALL PASS" if ok else "SOMETHING FAILED")
     return 0 if ok else 1
 
@@ -119,11 +132,17 @@ async def _tgsetup(cfg: Config) -> None:
         await tg.call("setMyName", name=BOT_NAME)
         await tg.call("setMyDescription", description=BOT_DESCRIPTION)
         await tg.call("setMyShortDescription", short_description=BOT_SHORT)
-        await tg.call("setMyCommands", commands=bot_commands(cfg.mail_enabled))
+        # The menu goes to the allowlisted chats only and is cleared for everyone else, so a guest
+        # who opens the bot sees no owner commands to tap.
+        await tg.call("setMyCommands", commands=[], scope={"type": "default"})
+        for chat_id in sorted(cfg.allowed_tg_ids):
+            await tg.call("setMyCommands", commands=bot_commands(cfg.mail_enabled, cfg.guest_enabled),
+                          scope={"type": "chat", "chat_id": chat_id})
         me = await tg.call("getMe")
-        commands = await tg.call("getMyCommands")
+        first = min(cfg.allowed_tg_ids, default=None)
+        commands = await tg.call("getMyCommands", scope={"type": "chat", "chat_id": first}) if first else []
         print(f"bot @{me['username']} is now called {me['first_name']!r}")
-        print("command menu:", ", ".join("/" + c["command"] for c in commands))
+        print("command menu (allowlisted chats only):", ", ".join("/" + c["command"] for c in commands))
 
 
 def cmd_tgsetup(args) -> int:
@@ -185,24 +204,30 @@ def cmd_mint(args) -> int:
     if not cfg.mail_enabled:
         print("Email printing is turned off in config.toml, so there is nothing to mint for.")
         return 1
-    store = Store(cfg.data_dir / "printtoken.db")
-    tokens = Tokens(store, cfg.token_ttl_min, cfg.max_outstanding, cfg.mints_per_hour)
+    store, tokens = _tokens_for(cfg)
     try:
         tag, expires = tokens.mint("local")
     except MintRefused as exc:
         print(f"Refused: {exc}")
         return 1
-    store.log_event(channel="local", kind="mint", outcome="ok", sender="local", detail=f"tag={tag}")
+    store.log_event(channel="local", kind="mint", outcome="ok", sender="local", detail=f"tag={mask(tag)}")
     print(f"{cfg.address_for(tag)}  (expires {time.strftime('%I:%M %p', time.localtime(expires))})")
     return 0
 
 
 def cmd_dryrun(args) -> int:
+    from . import notes
     cfg = load(need_secrets=False)
     data = Path(args.file).read_bytes()
     started = time.perf_counter()
     try:
-        pdf, pages, kind = convert.to_pdf(data)
+        if args.note:
+            # The file stands in for a typed Telegram message, so the clean page layout can be
+            # checked on the laptop without the bot.
+            pdf, pages = notes.to_pdf(data.decode("utf-8", errors="replace"))
+            kind = "note"
+        else:
+            pdf, pages, kind = convert.to_pdf(data)
     except convert.Unsupported as exc:
         print(f"Rejected: {exc}")
         return 1
@@ -211,6 +236,93 @@ def cmd_dryrun(args) -> int:
     done = time.perf_counter()
     print(f"{kind}, {pages} page(s), convert {converted - started:.2f}s, spool {done - converted:.2f}s")
     print(f"output: {info['output']}")
+    return 0
+
+
+def _bot_username(cfg: Config) -> str | None:
+    """The bot's @name for the invite's deep link, or None when Telegram cannot be reached."""
+    import httpx
+    try:
+        me = httpx.get(f"https://api.telegram.org/bot{cfg.bot_token}/getMe", timeout=10).json()
+        return me.get("result", {}).get("username")
+    except Exception:
+        return None
+
+
+def cmd_guest(args) -> int:
+    """A guest key without the bot: the same forwardable block /invite sends, printed here."""
+    from .telegram import invite_text
+    cfg = load()
+    if not cfg.guest_enabled:
+        print("Guest keys are turned off in config.toml ([guest] enabled = false).")
+        return 1
+    store, tokens = _tokens_for(cfg)
+    days = cfg.guest_key_days if args.days is None else args.days
+    note = (args.note or "").strip()
+    try:
+        tag, expires = tokens.mint_guest("local", note, days)
+    except MintRefused as exc:
+        print(f"Refused: {exc}")
+        return 1
+    store.log_event(channel="local", kind="guest", outcome="minted", sender="local",
+                    detail=f"tag={mask(tag)} note={note}")
+    address = cfg.address_for(tag) if cfg.mail_enabled else None
+    print(invite_text(tag, expires, _bot_username(cfg), min(cfg.guest_page_cap, cfg.page_cap), address))
+    print(f"\nNote: {note or 'none'}. Forward the block above to the guest. The gateway "
+          f"(python -m printtoken run) has to be running for the key to answer.")
+    return 0
+
+
+def cmd_guests(args) -> int:
+    from .telegram import when
+    cfg = load(need_secrets=False)
+    _, tokens = _tokens_for(cfg)
+    keys = tokens.guest_keys()
+    if not keys:
+        print("no guest keys yet")
+        return 0
+    for key in keys:
+        holder = f" by {key.claimed_by}" if key.claimed_by else ""
+        print(f"{mask(key.tag):8} {key.state:9} until {when(key.expires)}{holder}  {key.note or ''}".rstrip())
+    return 0
+
+
+def _guest_matches(tokens: Tokens, typed: str) -> list[KeyRecord]:
+    """The guest keys a typed key names. `guests` shows only the first four characters (the full
+    key is shown exactly once, in the invite), so anything shorter than a key is matched as a
+    prefix, with and without a PT typed in front of it. A full-length key must match exactly, so
+    a mistyped key never picks a different one."""
+    if not typed:
+        return []
+    keys = tokens.guest_keys()
+    if len(typed) >= KEY_LEN:
+        return [k for k in keys if k.tag == typed]
+    prefixes = [typed] + ([typed[2:]] if typed.startswith("pt") and len(typed) > 2 else [])
+    for prefix in prefixes:
+        found = [k for k in keys if k.tag.startswith(prefix)]
+        if found:
+            return found
+    return []
+
+
+def cmd_revoke(args) -> int:
+    cfg = load(need_secrets=False)
+    store, tokens = _tokens_for(cfg)
+    matches = _guest_matches(tokens, normalise(args.key))
+    if not matches:
+        print("no such guest key")
+        return 1
+    if len(matches) > 1:
+        print("more than one guest key starts like that, give more of it:")
+        for key in matches:
+            print(f"  {display_key(key.tag)}  {key.state:9} {key.note or ''}".rstrip())
+        return 1
+    rec = matches[0]
+    if not tokens.spend(rec.tag):
+        print(f"{display_key(rec.tag)} was already {rec.state}")
+        return 1
+    store.log_event(channel="local", kind="guest", outcome="revoked", sender="local", detail=f"tag={mask(rec.tag)}")
+    print(f"revoked {display_key(rec.tag)} ({rec.note or 'no note'})")
     return 0
 
 
@@ -240,7 +352,18 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("mint").set_defaults(func=cmd_mint)
     p = sub.add_parser("dryrun")
     p.add_argument("file")
+    p.add_argument("--note", action="store_true",
+                   help="lay FILE out as a typed note (the clean page) instead of detecting its type")
     p.set_defaults(func=cmd_dryrun)
+    p = sub.add_parser("guest")
+    p.add_argument("--days", type=int, default=None, help="days the key stays open (default: [guest] key_days)")
+    p.add_argument("--note", default="", help="who the key is for, shown only to the owner")
+    p.set_defaults(func=cmd_guest)
+    sub.add_parser("guests").set_defaults(func=cmd_guests)
+    p = sub.add_parser("revoke")
+    p.add_argument("key", help="the key in any form (PT-ABCD-EFGH-IJKL or the bare characters), or the first "
+                               "characters that guests shows")
+    p.set_defaults(func=cmd_revoke)
     p = sub.add_parser("report")
     p.add_argument("--days", type=float, default=0)
     p.add_argument("--csv")

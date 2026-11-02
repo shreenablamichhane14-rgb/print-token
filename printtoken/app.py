@@ -75,7 +75,13 @@ async def run(cfg: Config) -> None:
     store = Store(cfg.data_dir / "printtoken.db")
     printer = make_printer(cfg.printer, cfg.data_dir / "dryrun")
     printer.check()
-    tokens = Tokens(store, cfg.token_ttl_min, cfg.max_outstanding, cfg.mints_per_hour)
+    tokens = Tokens(store, cfg.token_ttl_min, cfg.max_outstanding, cfg.mints_per_hour, cfg.guest_max_live)
+    # Nothing can be mid-print before the pipeline starts, so a guest key still held from a run
+    # that crashed is let go here instead of staying dead on both channels until it expires.
+    stale = tokens.release_all()
+    if stale:
+        store.log_event(channel="system", kind="start", outcome="ok",
+                        detail=f"released {stale} stale guest key reservation(s)")
     pins = PinGuard(cfg.pin_hash, cfg.pin_failures_per_hour)
     limiter = RateLimiter(cfg.prints_per_hour)
     async with httpx.AsyncClient() as client:
@@ -83,6 +89,7 @@ async def run(cfg: Config) -> None:
         me = await tg.call("getMe")
         pipeline = Pipeline(store, printer, cfg.page_cap, cfg.queue_size, cfg.workers)
         bot = Bot(cfg, tg, tokens, pins, pipeline, store, limiter)
+        bot.username = me.get("username")       # for the t.me deep link in /invite
         pipeline.notify = bot.on_result
         tasks = [pipeline.run(), bot.run(), heartbeat(store)]
         watcher = None

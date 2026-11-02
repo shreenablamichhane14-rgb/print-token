@@ -3,9 +3,18 @@
 REASON_TEXT = {
     "no_tag": "it was not sent to a +tag print address",
     "malformed_tag": "the +tag is not a print address",
-    "unknown_tag": "that print address was never issued",
-    "expired_tag": "that print address had expired",
-    "replayed_tag": "that print address was already used",
+    "unknown_tag": "that print address or key was never issued",
+    "expired_tag": "that print address or key had expired",
+    "replayed_tag": "that print address or key was already used",
+    "bad_key": "the guest key was wrong",
+    "key_claimed": "that key was already claimed by another account",
+    "key_in_use": "that key is already printing a file",
+    "guest_locked": "too many wrong keys from this account",
+    "too_many_files": "too many files from one guest account in an hour",
+    "guest_off": "guest keys are turned off",
+    "too_many_failures": "the key was closed after too many failed prints",
+    "bad_note": "the typed note was empty or too long",
+    "no_draft": "no note was waiting for /go",
     "dmarc_fail": "the sender's domain failed DMARC (possible forgery)",
     "dmarc_none": "the sender's domain has no DMARC result",
     "dmarc_missing": "Gmail added no authentication result",
@@ -31,9 +40,11 @@ REASON_TEXT = {
 }
 
 # Email rejections worth a Telegram message to the owner. Unknown and malformed tags are only
-# logged, otherwise anyone guessing addresses could flood the owner's phone.
+# logged, otherwise anyone guessing addresses could flood the owner's phone. The last three can
+# only come from a real guest key, which is exactly when the owner wants to step in.
 NOTIFY_MAIL_REASONS = {"expired_tag", "replayed_tag", "sender_not_allowlisted", "no_attachment",
-                       "too_many_attachments", "oversize", "rate_limited", "queue_full"}
+                       "too_many_attachments", "oversize", "rate_limited", "queue_full",
+                       "key_in_use", "guest_off", "unsupported_type"}
 
 
 def describe(reason: str) -> str:

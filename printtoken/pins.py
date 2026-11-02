@@ -1,4 +1,4 @@
-"""The PIN that has to come with /print before the bot hands out an address.
+"""The PIN that has to come with /print or /invite before the bot hands out an address or a key.
 
 Only a salted scrypt hash is stored. Wrong guesses are counted per Telegram user, and after too many
 in an hour that user is locked out for the rest of the hour.
@@ -9,7 +9,8 @@ import hashlib
 import hmac
 import secrets
 import time
-from collections import defaultdict, deque
+
+from .policy import AttemptLimiter
 
 N, R, P = 2 ** 14, 8, 1
 
@@ -36,17 +37,10 @@ class PinGuard:
     def __init__(self, stored_hash: str, max_failures_per_hour: int = 5):
         self.stored = stored_hash
         self.max_failures = max_failures_per_hour
-        self._failures: dict[int, deque[float]] = defaultdict(deque)
-
-    def _recent(self, user: int, now: float) -> deque[float]:
-        q = self._failures[user]
-        while q and q[0] <= now - 3600:
-            q.popleft()
-        return q
+        self.attempts = AttemptLimiter(max_failures_per_hour)
 
     def locked(self, user: int, now: float | None = None) -> bool:
-        now = time.time() if now is None else now
-        return len(self._recent(user, now)) >= self.max_failures
+        return self.attempts.locked(user, now)
 
     @property
     def configured(self) -> bool:
@@ -58,5 +52,5 @@ class PinGuard:
             return False
         if pin and matches(pin, self.stored):
             return True
-        self._recent(user, now).append(now)
+        self.attempts.fail(user, now)
         return False

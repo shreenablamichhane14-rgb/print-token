@@ -34,6 +34,8 @@ class PrintJob:
     picked_ts: float = field(default_factory=time.time)
     reply_chat: int | None = None
     event_id: int | None = None
+    page_cap: int | None = None         # a guest key's smaller cap; None means the gateway's own
+    guest_tag: str | None = None        # the guest key this print spends; None for the owner's jobs
 
 
 @dataclass
@@ -96,13 +98,17 @@ class Pipeline:
 
     def process(self, job: PrintJob) -> JobResult:
         """Runs in a worker thread, never on the event loop."""
+        # A job's own cap (a guest key) can only lower the gateway's cap, never raise it.
+        cap = self.page_cap if job.page_cap is None else min(job.page_cap, self.page_cap)
         try:
-            pdf, pages, _kind = convert.to_pdf(job.data)
+            pdf, pages, _kind = convert.to_pdf(job.data, page_cap=cap)
+        except convert.TooLong as exc:
+            return JobResult(False, "over_page_cap", detail=str(exc))
         except convert.Unsupported as exc:
             return JobResult(False, "unsupported_type", detail=str(exc))
-        if pages > self.page_cap:
+        if pages > cap:
             return JobResult(False, "over_page_cap", pages=pages,
-                             detail=f"{pages} pages, the limit is {self.page_cap}")
+                             detail=f"{pages} pages, the limit is {cap}")
         job_name = f"PT{job.event_id or 0:05d} {job.filename}"[:120]
         with self._print_lock:
             try:
