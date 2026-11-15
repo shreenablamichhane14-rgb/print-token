@@ -1,0 +1,28 @@
+# Keeps a wake-up alarm set on the Pi's clock chip, always a few minutes ahead.
+#
+# A Raspberry Pi 5 that is switched off but still has power (someone ran poweroff, the button was
+# pressed, the board cut out) stays off until somebody presses its button. While the Pi is running,
+# print-token-wake.timer runs this every 2 minutes and moves the alarm to 5 minutes from now, so
+# it never goes off. Once the Pi is off nothing moves it any more, the alarm comes due, and the Pi
+# switches itself back on.
+#
+# To keep the Pi off on purpose: unplug it (with no power there is no alarm), or first
+#   sudo systemctl stop print-token-wake.timer && echo 0 | sudo tee /sys/class/rtc/rtc0/wakealarm
+[Unit]
+Description=Print Token: keep the Pi's wake-up alarm 5 minutes ahead
+ConditionPathExists=/sys/class/rtc/rtc0/wakealarm
+# Besides the timer, this runs once at the very start of every boot (WantedBy=sysinit.target
+# below, and no default dependencies so nothing holds it back). A Pi that dies again while it
+# is still starting, which is when it draws the most power, then gets another try 5 minutes later.
+DefaultDependencies=no
+
+[Service]
+Type=oneshot
+# 0 clears the old alarm (the kernel refuses to overwrite one that is still pending), +300 sets
+# the new one 300 seconds from now.
+ExecStart=/bin/sh -c 'echo 0 > /sys/class/rtc/rtc0/wakealarm && echo +300 > /sys/class/rtc/rtc0/wakealarm'
+# Runs 720 times a day: keep the "started, finished" lines out of the journal, errors still show.
+LogLevelMax=notice
+
+[Install]
+WantedBy=sysinit.target

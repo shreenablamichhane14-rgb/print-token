@@ -1,6 +1,7 @@
 import asyncio
 import re
 
+import pytest
 from conftest import make_pdf
 
 from printtoken.config import Config
@@ -137,3 +138,47 @@ def test_document_is_queued(tmp_path, store, tokens):
     job = pipeline.queue.items[0]
     assert job.data == pdf and job.reply_chat == OWNER and job.channel == "telegram"
     assert tg.sent[0][1].startswith("Got a.pdf")
+
+
+class StopPolling(Exception):
+    """Ends Bot.run in a test: the long poll loop has no other way out."""
+
+
+class PollingTG(FakeTG):
+    """Telegram as the long poll sees it: hands out the scripted batches, notes every position the
+    bot asks from, and stops the bot when the script runs out."""
+
+    def __init__(self, batches):
+        super().__init__()
+        self.batches, self.offsets = list(batches), []
+
+    async def call(self, method, **params):
+        assert method == "getUpdates"
+        self.offsets.append(params["offset"])
+        if not self.batches:
+            raise StopPolling
+        return self.batches.pop(0)
+
+
+def test_a_restarted_bot_picks_up_where_it_stopped(tmp_path, store, tokens):
+    """After a crash or a power cut the bot asks Telegram only for what it has not seen. The
+    position is saved with every message, so nothing is handled twice, and what was sent while the
+    gateway was down is still waiting at Telegram (it keeps messages for a bot for 24 hours)."""
+    def update(update_id):
+        return {"update_id": update_id, "message": msg(text="/help")}
+
+    first, _, _ = make_bot(tmp_path, store, tokens)
+    first.tg = before = PollingTG([[update(40), update(41)]])
+    with pytest.raises(StopPolling):
+        asyncio.run(first.run())
+    assert before.offsets == [0, 42]            # a new database starts at 0, then moves past 41
+    assert len(before.sent) == 2
+
+    # The gateway stops without warning here. A new bot on the same database, and two messages
+    # that came in while nothing was running.
+    second, _, _ = make_bot(tmp_path, store, tokens)
+    second.tg = after = PollingTG([[update(42), update(43)]])
+    with pytest.raises(StopPolling):
+        asyncio.run(second.run())
+    assert after.offsets == [42, 44]            # 40 and 41 are not asked for again
+    assert len(after.sent) == 2                 # both waiting messages got their answer

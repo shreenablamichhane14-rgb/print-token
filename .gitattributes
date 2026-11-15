@@ -1,0 +1,3 @@
+# The files under deploy/ run on Linux (the Raspberry Pi): keep their line endings as LF even on
+# a Windows checkout, or the shell scripts break on the first line.
+deploy/** text eol=lf

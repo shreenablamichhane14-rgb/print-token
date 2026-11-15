@@ -8,8 +8,8 @@ ever has to reach in.
 CIS2910C IT Capstone project, Shrinab Lamichhane, Fall 2026.
 
 Status: the Telegram side works and is tested; email is built and tested but switched off until
-its Gmail account is set up. Developed on a Windows laptop, moving to a Raspberry Pi 5 so it can
-stay on all the time.
+its Gmail account is set up. Developed on a Windows laptop; it now runs on a Raspberry Pi 5 as a
+service, so it stays on all the time.
 
 ## How it works
 
@@ -123,7 +123,98 @@ first: the expiry times in the messages use the machine's own time zone.
 
 Other commands: `dryrun [--note] FILE`, `mint` (local address, email testing),
 `guest [--days N] [--note TEXT]`, `guests`, `revoke KEY`, `report [--days N] [--csv out.csv]`.
-Tests: `python -m pytest -p no:faulthandler` (139 tests).
+Tests: `python -m pytest -p no:faulthandler` (140 tests).
+
+## On the Raspberry Pi
+
+The gateway runs on a Raspberry Pi 5 (Raspberry Pi OS Trixie, Python 3.13) as a systemd service,
+installed from this repository:
+
+```
+git clone https://github.com/shreenablamichhane14-rgb/print-token.git /tmp/print-token
+sudo bash /tmp/print-token/deploy/install-pi.sh
+```
+
+The script is safe to run again, and after the first time it lives on the Pi itself:
+`sudo bash /opt/print-token/deploy/install-pi.sh` pulls the newest code and restarts the gateway.
+It never touches the settings, the secrets or the data that are already there.
+
+| Where | What |
+|---|---|
+| `/opt/print-token` | the code and its Python environment, owned by root, so the gateway cannot change its own code |
+| `/etc/print-token/config.toml` | settings, made from `config.example.toml` (`printer = "DRYRUN"`, email off) |
+| `/etc/print-token/secrets/env` | bot token, allowed ids, PIN hash; only the service account can read it |
+| `/var/lib/print-token` | database, log, dry run PDFs |
+| `print-token.service` | starts on boot, comes back 15 s after any exit |
+| `print-token-wake.timer` | a wake-up alarm that switches a shut down Pi back on (below) |
+| `/usr/local/bin/print-token` | the commands below, run as the service account |
+
+A fresh install has no secrets, so the script ends by naming the three lines to put in
+`/etc/print-token/secrets/env`. After that, from any SSH session:
+
+```
+print-token selftest            printer, bot and PIN checks
+print-token setpin              set the PIN, then the gateway restarts by itself
+print-token guest --note "who"  a one-time guest key
+print-token guests | revoke KEY | report --days 1 | tgtest | dryrun FILE
+print-token status | logs | restart
+```
+
+What the service does that the laptop did not need:
+
+- **It waits for the clock.** A Pi has no clock battery, so after a power cut the time is wrong
+  until the network answers. Key expiry and the uptime numbers come from the clock, so the service
+  waits for the first time sync (two minutes at most) before it starts.
+- **It keeps coming back.** The gateway exits when Telegram cannot be reached at start, which is
+  normal right after boot. systemd starts it again every 15 s for as long as it takes.
+- **It picks up where it stopped.** With every message the bot saves its place in Telegram's
+  list, and Telegram keeps what a bot has not collected for up to 24 hours. After a crash, a
+  reboot or a power cut the gateway asks only for what it has not seen, so a file sent while the
+  Pi was down prints when it is back. The place is saved before the message is handled: a file
+  that was being handled at the very moment of a crash is skipped, never printed twice.
+- **It switches itself back on.** A Pi 5 that was shut down but still has power stays off until
+  someone presses its button. `print-token-wake.timer` keeps a wake-up alarm in the Pi's clock
+  chip, 5 minutes ahead, and moves it every 2 minutes while the Pi runs (the first time within
+  seconds of power-on). Once the Pi is off nothing moves the alarm, it comes due, and the Pi
+  starts again. A Pi that lost power
+  completely does not need this: it starts when the power comes back. The alarm uses the
+  low-power wake mode from the Raspberry Pi documentation, which needs `POWER_OFF_ON_HALT=1` and
+  `WAKE_ON_GPIO=0` in the bootloader settings (`sudo rpi-eeprom-config --edit`). To keep the Pi
+  off on purpose, unplug it, or stop the timer and clear the alarm first (the two commands are
+  at the top of `deploy/print-token-wake.service`).
+- **It stops the way Ctrl-C stops it.** systemd sends SIGINT instead of its usual SIGTERM, so on
+  a restart or a normal shutdown the gateway writes its "stop" record and closes the database. A
+  start in the event log with no stop before it is then a crash or a power cut.
+- **It is boxed in.** The service account cannot log in, sees the system read-only, has no home
+  folder and no devices, and can write only `/var/lib/print-token`. Past 1.5 GB of memory the
+  service is stopped and restarted, so one oversized picture cannot take the Pi down. That limit
+  needs the kernel's memory controller, which Raspberry Pi OS leaves off: add
+  `cgroup_enable=memory` to the one line in `/boot/firmware/cmdline.txt` and reboot.
+- **One gateway only.** `print-token run` refuses: a second gateway on the same bot token fights
+  the first one for messages, and on the same data folder it would release the first one's guest
+  key holds.
+
+**The printer.** CUPS is part of Raspberry Pi OS. `lpstat -e` lists what it can see, and a network
+printer gets a fixed queue with
+`sudo lpadmin -p SmartTank -v ipp://<printer name>.local/ipp/print -m everywhere`. That queue is
+live the moment it exists (pitfall 17), so until printing on the real printer is wanted:
+`sudo cupsreject SmartTank` and `sudo cupsdisable SmartTank`. To go live: `sudo lpadmin -p
+SmartTank -E`, set `printer = "SmartTank"` in `/etc/print-token/config.toml`, `print-token
+restart`.
+
+**Testing the CUPS path with no printer involved.** A queue whose output is thrown away:
+`sudo lpadmin -p PT_NULL -v file:///dev/null -m drv:///sample.drv/generic.ppd -E`. Point
+`make_printer("PT_NULL")` at it, print, and remove it with `sudo lpadmin -x PT_NULL`.
+
+Checked on the Pi on 2026-11-15, one run each: the test suite (all pass; the 3 that need
+Microsoft Print to PDF are skipped there); `tgtest` from the Pi (1,209 bytes up in 0.78 s, back
+in 0.67 s, SHA-256 match); a two page job through `CupsPrinter` into the throwaway queue
+(accepted in 0.01 s, gone from the queue after 1.0 s); the typed note page; the process killed
+(running again after 16 s); a hard reboot with no clean shutdown, `echo b >
+/proc/sysrq-trigger` (running again after 45 s, SQLite `integrity_check` ok); the plug pulled
+(running 37 s after the power came back; the clock chip had reset to 1970 and the service waited
+23 s for the right time); and a clean shutdown with the power left on (the Pi woke itself after
+4.5 minutes and the gateway was running 37 s later).
 
 ## Pitfalls for whoever works on this next
 
@@ -145,7 +236,7 @@ Tests: `python -m pytest -p no:faulthandler` (139 tests).
    `ImageOps.exif_transpose` before printing.
 10. **Telegram compresses photos**; the bot asks for files instead. Bot downloads stop at 20 MB.
 11. **PyMuPDF is AGPL** (dual licensed by Artifex). Fine for personal use; check before selling.
-12. **Laptops sleep.** Heartbeats make sleep visible as downtime, which is why it is moving to a Pi.
+12. **Laptops sleep.** Heartbeats make sleep visible as downtime, which is why it moved to a Pi.
 13. **pytest on Windows prints "Windows fatal exception 0x80040155"** in the dry run tests. It is a
     handled COM error inside Microsoft Print to PDF; run with `-p no:faulthandler`.
 14. **Several Pythons on one PC.** `python` and `py` can open different versions, and packages
@@ -153,6 +244,19 @@ Tests: `python -m pytest -p no:faulthandler` (139 tests).
 15. **PyMuPDF `Story.place()` hands back the same content until `draw()` runs for that page.** A
     loop that only places to count the pages first never finishes; keep the place, draw, end_page
     shape in `notes.py`.
+16. **python-dotenv writes its temporary file next to the file it changes**, so `setpin` needs to
+    write to the folder, not only to the file. On the Pi the secrets file has a folder of its own
+    that belongs to the service account.
+17. **`lpadmin -m everywhere` makes a queue that is enabled and accepting at once**, with or
+    without `-E`. A printer that should stay off needs `cupsreject` and `cupsdisable` right after.
+18. **Git on Windows checks shell scripts out with CRLF line endings**, and Linux then cannot run
+    them. `.gitattributes` keeps everything under `deploy/` at LF.
+19. **An open-ended `>=` in `requirements.txt` is a moving target.** The first install on the Pi
+    got PyMuPDF 2.1 where the laptop had 1.28, and with it about 20 packages the gateway never
+    uses. The tests passed on both, but the file now carries upper bounds on the major versions.
+20. **`MemoryMax=` in a systemd unit does nothing on a stock Raspberry Pi OS**, and says so
+    nowhere: the kernel's memory controller is switched off until `cgroup_enable=memory` is in
+    `/boot/firmware/cmdline.txt`. Check `/sys/fs/cgroup/cgroup.controllers`.
 
 ## Threat model
 
@@ -167,13 +271,15 @@ property is claimed.
 ```
 printtoken/   config.py store.py tokens.py pins.py mailparse.py policy.py convert.py notes.py printer.py
               pipeline.py telegram.py mailwatch.py messages.py report.py app.py __main__.py
-tests/        139 tests: tokens and guest keys, mail parsing and policy, the mailbox, conversion and
+tests/        140 tests: tokens and guest keys, mail parsing and policy, the mailbox, conversion and
               printing (Windows and CUPS), typed notes, blocking, the bot and the command line
+deploy/       the Raspberry Pi side: install-pi.sh, print-token.service, print-token (the command),
+              print-token-wake.service and .timer (the wake-up alarm)
 data/         (git-ignored) printtoken.db, printtoken.log, dryrun/
 ```
 
 ## Not done yet
 
-Email switched on with its own Gmail account, the move to the Raspberry Pi 5 (CUPS backend
-written and unit tested, not yet run on the Pi), Word/DOCX input, starting automatically on boot,
-the attack tests and the uptime trial.
+Email switched on with its own Gmail account, a print on the real printer from the Pi (the CUPS
+path has run there only against a throwaway queue), Word/DOCX input, the attack tests and the
+uptime trial.

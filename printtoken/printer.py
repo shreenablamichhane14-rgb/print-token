@@ -1,8 +1,8 @@
 """Printing a PDF with no dialog.
 
 On Windows (the laptop) PyMuPDF renders each page to a bitmap and Windows GDI hands it to the
-spooler, so nothing extra has to be installed. On Linux (the Raspberry Pi 5 the gateway is moving
-to) the PDF goes to CUPS through the lp command instead. DRYRUN never uses paper: on Windows it
+spooler, so nothing extra has to be installed. On Linux (the Raspberry Pi 5 the gateway runs on)
+the PDF goes to CUPS through the lp command instead. DRYRUN never uses paper: on Windows it
 sends the same GDI job to "Microsoft Print to PDF", on Linux it saves the PDF that would have
 been sent to CUPS.
 
@@ -149,8 +149,8 @@ def _draw_page(dc, page, horz: int, vert: int, dpi: int) -> None:
 
 class CupsPrinter:
     """Linux backend for the Raspberry Pi. CUPS does the scaling (fit-to-page) and the driver work.
-    Written ahead of the move; the commands it builds are covered by tests, but it has not run on
-    the Pi yet."""
+    The commands it builds are covered by tests, and on the Pi it has printed into a throwaway CUPS
+    queue (2026-11-15); it has not driven the real printer yet."""
 
     def __init__(self, name: str, dryrun_dir: Path | None = None, run=subprocess.run):
         self.name = name

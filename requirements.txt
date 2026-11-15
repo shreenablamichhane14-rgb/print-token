@@ -1,6 +1,8 @@
-httpx>=0.27
-pymupdf>=1.24
-pillow>=10.0
+# Upper bounds on purpose: these are the major versions the tests were written against. An
+# open-ended >= once let a fresh install pick a new major version with 20 extra packages.
+httpx>=0.27,<1
+pymupdf>=1.24,<2
+pillow>=10.0,<13
 pywin32>=306; sys_platform == "win32"
-python-dotenv>=1.0
-pytest>=8.0
+python-dotenv>=1.0,<2
+pytest>=8.0,<10

@@ -1,0 +1,63 @@
+# Print Token on a Raspberry Pi: the gateway as a service that starts on boot and comes back by
+# itself. Installed by deploy/install-pi.sh as /etc/systemd/system/print-token.service.
+#
+#   systemctl status print-token        is it running
+#   journalctl -u print-token -n 50     what it said
+#   print-token selftest                the gateway's own commands, run as the service user
+
+[Unit]
+Description=Print Token gateway (Telegram and one-time email to the home printer)
+Documentation=https://github.com/shreenablamichhane14-rgb/print-token
+Wants=network-online.target
+After=network-online.target
+# Never give up restarting: after a power cut the Wi-Fi can take minutes, and the gateway exits
+# when it cannot reach Telegram at start.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=printtoken
+Group=printtoken
+WorkingDirectory=/opt/print-token
+Environment=PRINT_TOKEN_CONFIG=/etc/print-token/config.toml
+Environment=PRINT_TOKEN_ENV=/etc/print-token/secrets/env
+Environment=PYTHONUNBUFFERED=1
+
+# A Pi has no clock battery, so after a power cut the time is wrong until the network answers.
+# Key expiry and the uptime numbers come from the clock: wait for the first time sync, two
+# minutes at most, then start anyway. ($$ is systemd's way of writing one $ for the shell.)
+ExecStartPre=/bin/sh -c 'n=0; until [ -e /run/systemd/timesync/synchronized ] || [ "$$n" -ge 60 ]; do n=$$((n+1)); sleep 2; done'
+ExecStart=/opt/print-token/.venv/bin/python -m printtoken run
+TimeoutStartSec=180
+# Stop it the way Ctrl-C does. Python turns that signal into a clean exit, so the gateway writes
+# its "stop" record and closes the database; the usual SIGTERM would end it mid-step.
+KillSignal=SIGINT
+Restart=always
+RestartSec=15
+
+# The gateway only reaches out (Telegram, Gmail, the local CUPS socket) and only writes its own
+# data folder. Everything else is read-only or hidden from it.
+StateDirectory=print-token
+StateDirectoryMode=0750
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+# One oversized picture must not take the whole Pi down with it: past this the service is
+# stopped and restarted instead. The limit only works when the kernel's memory controller is
+# on, and Raspberry Pi OS ships with it off: add cgroup_enable=memory to the one line in
+# /boot/firmware/cmdline.txt and reboot (cat /sys/fs/cgroup/cgroup.controllers then lists memory).
+MemoryMax=1500M
+
+[Install]
+WantedBy=multi-user.target

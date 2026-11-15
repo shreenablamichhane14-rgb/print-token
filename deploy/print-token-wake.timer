@@ -1,0 +1,11 @@
+# Runs print-token-wake.service every 2 minutes while the Pi is up (see that file for the why).
+[Unit]
+Description=Print Token: move the Pi's wake-up alarm every 2 minutes
+
+[Timer]
+OnBootSec=20s
+OnUnitActiveSec=2min
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

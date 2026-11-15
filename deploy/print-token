@@ -1,0 +1,48 @@
+#!/bin/sh
+# print-token: the gateway's commands on the Pi, run the way the service runs them (same user,
+# same settings, same secrets). Installed by deploy/install-pi.sh as /usr/local/bin/print-token.
+#
+#   print-token selftest              printer, bot and PIN checks, prints nothing
+#   print-token setpin                set the PIN for /invite and /print, then restart the gateway
+#   print-token guest --note "who"    make a one-time guest key
+#   print-token guests | revoke KEY | report --days 1 | tgsetup | tgtest | dryrun FILE
+#   print-token status | logs [N] | start | stop | restart     the service itself
+set -eu
+umask 077       # what these commands write (dry run PDFs, the database) stays private, as in the service
+
+APP=/opt/print-token
+UNIT=print-token
+SVC_USER=printtoken
+
+as_service() {
+    sudo -u "$SVC_USER" env \
+        PRINT_TOKEN_CONFIG=/etc/print-token/config.toml \
+        PRINT_TOKEN_ENV=/etc/print-token/secrets/env \
+        PYTHONPATH="$APP" \
+        "$APP/.venv/bin/python" -m printtoken "$@"
+}
+
+case "${1:-}" in
+    ""|-h|--help|help)
+        sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'
+        exit 0 ;;
+    status)
+        exec systemctl status "$UNIT" --no-pager ;;
+    logs)
+        exec sudo journalctl -u "$UNIT" -n "${2:-50}" --no-pager ;;
+    start|stop|restart)
+        exec sudo systemctl "$1" "$UNIT" ;;
+    run)
+        # Two gateways on one bot token fight over the messages, and a second one on the same
+        # data folder would release the first one's guest key holds.
+        echo "The gateway runs as a service here: print-token start | stop | restart | status" >&2
+        exit 1 ;;
+    setpin)
+        as_service "$@"
+        # The PIN hash is read once at start, so the running gateway needs a restart to see it.
+        sudo systemctl try-restart "$UNIT"
+        echo "The gateway was restarted and now knows the PIN."
+        exit 0 ;;
+esac
+
+as_service "$@"
