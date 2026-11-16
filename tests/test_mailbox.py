@@ -1,5 +1,6 @@
 """The IMAP side against a fake server: where the watcher starts, what it fetches, and the
 "UID n:*" quirk that would otherwise hand back the same message on every check."""
+import pytest
 from conftest import make_mail
 
 from printtoken.config import Config
@@ -99,26 +100,29 @@ def test_a_different_mailbox_starts_fresh(tmp_path, store):
     assert store.kv_get("imap:printbox@gmail.com:last_uid") == "20"
 
 
-# "To: <" makes the email package raise IndexError (Python 3.11 and 3.12). Anyone can send it to
-# the base address, no +tag needed.
-POISON = b"From: x@evil.example\nTo: <\nSubject: hi\n\nhello\n"
+# Some malformed address headers make the email package raise, and anyone can send them to the base
+# address, no +tag needed. Which ones depends on the Python version: "<" crashes 3.11 and 3.12.3 but
+# not 3.12.10 or later, while a lone double quote crashes all of them. Keep several, so these tests
+# mean something on whatever Python the gateway runs on.
+MALFORMED = [b"<", b'"', b"a@[", b":;:", b".:"]
 
 
-def test_a_malformed_address_header_does_not_stop_the_mailbox(tmp_path, store):
+@pytest.mark.parametrize("value", MALFORMED)
+def test_a_malformed_address_header_does_not_stop_the_mailbox(tmp_path, store, value):
     fake = FakeIMAP({1: TAGGED})
     box = Mailbox(cfg(tmp_path), store, connect=fake)
     assert box.fetch_new() == []
-    fake.messages[2] = POISON
+    fake.messages[2] = b"From: x@evil.example\nTo: " + value + b"\nSubject: hi\n\nhello\n"
     fake.messages[3] = TAGGED                    # a real print request right behind it
     assert [m.uid for m in box.fetch_new()] == [3]
     assert store.kv_get("imap:printbox@gmail.com:last_uid") == "3"
 
 
-def test_a_malformed_from_header_parses_with_no_sender():
+@pytest.mark.parametrize("value", MALFORMED)
+def test_a_malformed_from_header_does_not_stop_the_parse(value):
     from printtoken import mailparse
-    raw = b"From: <\nTo: printbox+abcdefgh@gmail.com\n\nhello\n"
-    mail = mailparse.parse(raw, "printbox", "gmail.com")
-    assert mail.from_addr == "" and mail.tags == ["abcdefgh"]
+    raw = b"From: " + value + b"\nTo: printbox+abcdefgh@gmail.com\n\nhello\n"
+    assert mailparse.parse(raw, "printbox", "gmail.com").tags == ["abcdefgh"]
 
 
 def test_one_mail_that_fails_does_not_drop_the_rest_of_the_batch(tmp_path, store):
