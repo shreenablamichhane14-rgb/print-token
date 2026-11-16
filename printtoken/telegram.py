@@ -74,6 +74,7 @@ GUEST_PRINTS_PER_HOUR = 5       # guests have their own budget, separate from th
 GUEST_REPLIES_PER_HOUR = 6      # answers to a guest who is not sending a file, per account
 GUEST_FAILURES_PER_KEY = 3      # failed prints before a key is closed
 GUEST_FILES_PER_HOUR = 10       # files looked at for one guest account, printable or not, then silence
+LOCKOUT_NOTICE_EVERY = 86400    # seconds between two lockout notices to the owner about one account
 
 
 def when(ts: float) -> str:
@@ -203,6 +204,7 @@ class Bot:
         self.guest_limiter = RateLimiter(GUEST_PRINTS_PER_HOUR)         # never the owner's budget
         self.file_guard = AttemptLimiter(GUEST_FILES_PER_HOUR)         # files looked at, per guest account
         self.guest_failures: dict[str, int] = {}                        # failed prints per key
+        self.lockout_told: dict[tuple[str, int], float] = {}            # (what, account) -> last notice
         self.username: str | None = None                                # set by app.run from getMe
         self.help = help_text(cfg.mail_enabled, cfg.guest_enabled)
         self.drafts: dict[int, Draft] = {}
@@ -453,7 +455,7 @@ class Bot:
         if verdict is Verdict.UNKNOWN:
             # A guess. Counted, and silence: a stranger learns nothing from a wrong key.
             self.key_guard.fail(user)
-            if self.key_guard.locked(user):
+            if self.key_guard.locked(user) and self._first_lockout("keys", user):
                 await self.notify_owner(f"{self._who(msg, user)} sent {self.key_guard.max_per_hour} wrong "
                                         f"guest keys and is ignored for an hour.")
             return
@@ -475,6 +477,17 @@ class Bot:
             return f"{name} is not something I can print (PDF, PNG, JPEG or plain text). Your key is still unused."
         return None
 
+    def _first_lockout(self, what: str, user: int) -> bool:
+        """True for the first lockout of this kind for this account in LOCKOUT_NOTICE_EVERY. The
+        limits use a rolling hour, so an account that keeps going at about the limit locks again
+        every few minutes; the owner hears about it once a day, not each time."""
+        now = time.time()
+        last = self.lockout_told.get((what, user))
+        if last is not None and now - last < LOCKOUT_NOTICE_EVERY:
+            return False
+        self.lockout_told[(what, user)] = now
+        return True
+
     async def guest_document(self, msg: dict, user: int, chat: int, key: KeyRecord) -> None:
         """One file from a guest. It is downloaded and looked at before the key is held, so a Word
         file, an empty file or a download hiccup leaves the key exactly as it was. Every file is a
@@ -488,7 +501,7 @@ class Bot:
             self._reject(user, "too_many_files", kind="guest")
             return
         self.file_guard.fail(user)
-        if self.file_guard.locked(user):
+        if self.file_guard.locked(user) and self._first_lockout("files", user):
             await self.notify_owner(f"{self._label(key)}: {self._who(msg, user)} has sent {GUEST_FILES_PER_HOUR} "
                                     f"files in an hour. Further files from that account are ignored for the "
                                     f"rest of the hour.")

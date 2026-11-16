@@ -791,3 +791,26 @@ def test_pipeline_uses_the_smaller_cap(store):
     assert r.reason == "over_page_cap" and "more than 5 pages" in r.detail
     assert pipeline.process(PrintJob("telegram", "tg:1", "ok.pdf", make_pdf(3), page_cap=5)).ok
     pipeline.pool.shutdown(wait=False)
+
+
+def test_a_stranger_who_keeps_guessing_is_reported_once(tmp_path, store, tokens, monkeypatch):
+    clock = [1_800_000_000.0]
+    monkeypatch.setattr(time, "time", lambda: clock[0])
+    bot, tg, _ = make_guest_bot(tmp_path, store, tokens)
+    for i in range(40):                         # one wrong key every 6 minutes for 4 hours
+        clock[0] = 1_800_000_000.0 + i * 360
+        run(bot.handle(msg(user=STRANGER, text="PT-ZZZZ-ZZZZ-ZZZZ")))
+    assert to(tg, STRANGER) == [] and len(to(tg, OWNER)) == 1
+    clock[0] += 3601                            # an hour of quiet ends the lock
+    assert not bot.key_guard.locked(STRANGER)
+
+
+def test_a_guest_who_keeps_sending_files_is_reported_once(tmp_path, store, tokens, monkeypatch):
+    clock = [1_800_000_000.0]
+    monkeypatch.setattr(time, "time", lambda: clock[0])
+    word = b"PK\x03\x04" + b"\x00" * 20
+    bot, tg, _, _ = claimed_bot(tmp_path, store, tokens, files={"w": word})
+    for i in range(40):                         # one Word file every 6 minutes for 4 hours
+        clock[0] = 1_800_000_000.0 + i * 360
+        run(bot.handle(doc("Syllabus.docx", "w")))
+    assert len([t for t in to(tg, OWNER) if "files in an hour" in t]) == 1
