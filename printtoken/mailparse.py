@@ -15,7 +15,8 @@ GMAIL_DOMAINS = {"gmail.com", "googlemail.com"}
 # but Gmail SEARCH (deliveredto:) only indexes the base address, so the tag is always read from
 # the headers themselves.
 TAG_HEADERS = ("To", "Cc", "Delivered-To", "X-Original-To")
-_METHOD = re.compile(r"\b(dkim|spf|dmarc|arc)\s*=\s*([a-z]+)", re.I)
+# A result is "method=result" at the very start of one ;-separated piece of the header.
+_METHOD = re.compile(r"\s*(dkim|spf|dmarc|arc)\s*=\s*([a-z]+)", re.I)
 
 
 @dataclass
@@ -82,13 +83,53 @@ def provider_auth_results(msg: EmailMessage, authserv_id: str = "mx.google.com")
     headers = msg.get_all("Authentication-Results", [])
     if not headers:
         return {}
-    text = str(headers[0])
-    if text.split(";", 1)[0].strip().lower() != authserv_id:
+    parts = _resinfo_parts(str(headers[0]))
+    if parts[0].strip().lower() != authserv_id:
         return {}
     results: dict[str, str] = {}
-    for method, result in _METHOD.findall(text):
-        results.setdefault(method.lower(), result.lower())
+    # Only the start of each piece counts. Gmail copies the sender's envelope address into the
+    # header (in the spf comment and in smtp.mailfrom), and "=" is legal in an address, so a sender
+    # can make the text "dmarc=pass" appear before Gmail's own dmarc result.
+    for part in parts[1:]:
+        match = _METHOD.match(part)
+        if match:
+            results.setdefault(match.group(1).lower(), match.group(2).lower())
     return results
+
+
+def _resinfo_parts(text: str) -> list[str]:
+    """Split an Authentication-Results value at the semicolons that separate results, dropping
+    (comments) and not splitting inside "quoted strings" (RFC 8601 section 2.2)."""
+    parts: list[str] = []
+    current: list[str] = []
+    depth, quoted, escaped = 0, False, False
+    for ch in text:
+        if escaped:
+            escaped = False
+            if not depth:
+                current.append(ch)
+        elif ch == "\\" and (quoted or depth):
+            escaped = True
+            if not depth:
+                current.append(ch)
+        elif depth:
+            depth += {"(": 1, ")": -1}.get(ch, 0)
+        elif quoted:
+            current.append(ch)
+            quoted = ch != '"'
+        elif ch == "(":
+            depth = 1
+            current.append(" ")
+        elif ch == '"':
+            quoted = True
+            current.append(ch)
+        elif ch == ";":
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(ch)
+    parts.append("".join(current))
+    return parts
 
 
 def attachments(msg: EmailMessage) -> list[Attachment]:

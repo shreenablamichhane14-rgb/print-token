@@ -138,3 +138,30 @@ def test_rate_limiter():
 
 def test_good_auth_constant_is_gmail_shaped():
     assert GOOD_AUTH.startswith("mx.google.com;")
+
+
+# Gmail copies the envelope sender into its header, in the spf comment and in smtp.mailfrom, and
+# "=" is legal in an address. A sender who passes SPF for their own domain can therefore put the
+# text "dmarc=pass" in front of Gmail's real verdict on a forged From.
+INJECTED_AUTH = ("mx.google.com; dkim=none; spf=pass (google.com: domain of x.dmarc=pass@evil.example "
+                 "designates 203.0.113.9 as permitted sender) smtp.mailfrom=x.dmarc=pass@evil.example; "
+                 "dmarc=fail (p=REJECT sp=REJECT dis=QUARANTINE) header.from=example.com")
+QUOTED_AUTH = ('mx.google.com; spf=pass smtp.mailfrom="x;dmarc=pass"@evil.example; '
+               "dmarc=fail (p=REJECT sp=REJECT dis=QUARANTINE) header.from=example.com")
+
+
+def test_dmarc_text_inside_the_sender_address_is_not_a_result():
+    assert parse(make_mail(auth=INJECTED_AUTH)).auth == {"dkim": "none", "spf": "pass", "dmarc": "fail"}
+    assert parse(make_mail(auth=QUOTED_AUTH)).auth == {"spf": "pass", "dmarc": "fail"}
+
+
+def test_injected_dmarc_text_cannot_pass_the_allowlist(tokens):
+    tag, mail = live_mail(tokens, frm="Alice <alice@example.com>", auth=INJECTED_AUTH)
+    decision = decide_mail(mail, tokens, ACCEPT, frozenset({"alice@example.com"}))
+    assert decision.reason == "dmarc_fail"
+    assert tokens.check(tag) is Verdict.OK
+
+
+def test_comments_are_skipped_but_results_after_them_are_read():
+    auth = "mx.google.com; dkim=pass (good (nested) signature) header.i=@example.com; dmarc=pass (p=NONE)"
+    assert parse(make_mail(auth=auth)).auth == {"dkim": "pass", "dmarc": "pass"}
