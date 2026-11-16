@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sqlite3
 import time
 from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 import httpx
 
@@ -54,6 +56,26 @@ def setup_logging(cfg: Config, verbose: bool = False) -> None:
     # httpx logs every request URL at INFO, and Telegram URLs contain the bot token.
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+
+class AlreadyRunning(Exception):
+    """Another gateway is running on the same data folder."""
+
+
+def single_instance(data_dir: Path) -> sqlite3.Connection:
+    """Hold an exclusive SQLite lock on data/run.lock for as long as the gateway runs (close the
+    returned connection to let go). SQLite locks work the same on Windows and Linux, and the
+    operating system drops the lock if the process dies. Without it a second `run` would release
+    the first one's guest key holds at start (a key could then print twice) and read the same
+    mailbox."""
+    data_dir.mkdir(parents=True, exist_ok=True)
+    lock = sqlite3.connect(str(data_dir / "run.lock"), timeout=0, isolation_level=None)
+    try:
+        lock.execute("BEGIN EXCLUSIVE")
+    except sqlite3.OperationalError:
+        lock.close()
+        raise AlreadyRunning(f"another gateway is already running on {data_dir}") from None
+    return lock
 
 
 async def heartbeat(store: Store, every: float = 60) -> None:

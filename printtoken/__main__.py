@@ -57,13 +57,20 @@ def _tokens_for(cfg: Config) -> tuple[Store, Tokens]:
 
 
 def cmd_run(args) -> int:
-    from .app import run, setup_logging
+    from .app import AlreadyRunning, run, setup_logging, single_instance
     cfg = load()
+    try:
+        lock = single_instance(cfg.data_dir)    # before run(), which releases stale guest key holds
+    except AlreadyRunning as exc:
+        print(f"Not started: {exc}. Stop the other one first.")
+        return 1
     setup_logging(cfg, args.verbose)
     try:
         asyncio.run(run(cfg))
     except KeyboardInterrupt:
         pass
+    finally:
+        lock.close()
     return 0
 
 
