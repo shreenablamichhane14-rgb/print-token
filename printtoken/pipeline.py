@@ -119,7 +119,15 @@ class Pipeline:
             spooled = time.time()
             done: float | None = spooled
             if self.wait_for_queue and not self.printer.is_dryrun:
-                waited = self.printer.wait_until_gone(job_name)
+                # The job is already with the printer. Losing sight of it (lpstat timing out, the
+                # Windows queue not opening) leaves the finish time unknown; it is not a failed
+                # print, which would release a guest key for a second print.
+                try:
+                    waited = self.printer.wait_until_gone(job_name)
+                except Exception as exc:
+                    log.warning("could not follow job %s in the printer queue: %s", job.event_id,
+                                exc.__class__.__name__)
+                    waited = None
                 done = None if waited is None else spooled + waited
         return JobResult(True, "printed", pages=info["pages"], spooled_ts=spooled, done_ts=done,
                          detail=info.get("output") or "")
