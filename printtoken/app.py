@@ -32,11 +32,20 @@ class Redact(logging.Filter):
         self.secrets = [s for s in secrets if s and len(s) >= 6]
 
     def filter(self, record: logging.LogRecord) -> bool:
-        message = record.getMessage()
-        for secret in self.secrets:
-            message = message.replace(secret, "<redacted>")
-        record.msg, record.args = message, ()
+        record.msg, record.args = self._blank(record.getMessage()), ()
+        # log.exception() adds a traceback after the message; the formatter would print it as is.
+        if record.exc_info and not record.exc_text:
+            record.exc_text = logging.Formatter().formatException(record.exc_info)
+        if record.exc_text:
+            record.exc_text = self._blank(record.exc_text)
+        if record.stack_info:
+            record.stack_info = self._blank(record.stack_info)
         return True
+
+    def _blank(self, text: str) -> str:
+        for secret in self.secrets:
+            text = text.replace(secret, "<redacted>")
+        return text
 
 
 def setup_logging(cfg: Config, verbose: bool = False) -> None:
