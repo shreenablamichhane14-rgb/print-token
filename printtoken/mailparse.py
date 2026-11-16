@@ -48,14 +48,24 @@ def _same_domain(a: str, b: str) -> bool:
     return a == b or (a in GMAIL_DOMAINS and b in GMAIL_DOMAINS)
 
 
+def _addresses(msg: EmailMessage, header: str) -> list[tuple[str, str]]:
+    """(name, address) pairs of one header, or none at all when the header cannot be parsed. The
+    email package raises on some malformed address headers (a bare "To: <" is enough), and a
+    sender must not be able to stop the mailbox check with one."""
+    try:
+        return getaddresses([str(v) for v in msg.get_all(header, [])])
+    except Exception:
+        return []
+
+
 def find_tags(msg: EmailMessage, base_local: str, base_domain: str) -> list[str]:
     base_domain = base_domain.lower()
     base = canonical_local(base_local, base_domain)
-    values: list[str] = []
+    pairs: list[tuple[str, str]] = []
     for header in TAG_HEADERS:
-        values += [str(v) for v in msg.get_all(header, [])]
+        pairs += _addresses(msg, header)
     found: list[str] = []
-    for _name, addr in getaddresses(values):
+    for _name, addr in pairs:
         local, at, domain = addr.strip().lower().rpartition("@")
         if not at or not _same_domain(domain, base_domain) or "+" not in local:
             continue
@@ -91,7 +101,7 @@ def attachments(msg: EmailMessage) -> list[Attachment]:
 
 def parse(raw: bytes, base_local: str, base_domain: str) -> ParsedMail:
     msg = BytesParser(policy=policy.default).parsebytes(raw)
-    senders = getaddresses([str(v) for v in msg.get_all("From", [])])
+    senders = _addresses(msg, "From")
     from_addr = senders[0][1].strip().lower() if senders else ""
     date_ts = None
     if msg.get("Date"):

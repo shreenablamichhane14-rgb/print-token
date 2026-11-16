@@ -170,12 +170,23 @@ class MailWatcher:
         while True:
             started = time.time()
             try:
-                for item in await asyncio.to_thread(self.box.fetch_new):
-                    await self.handle(item)
-                self.store.kv_set("imap_last_ok", time.time())
+                await self.check_once()
             except Exception as exc:
                 log.warning("mailbox check failed: %s", exc.__class__.__name__)
             await asyncio.sleep(max(1.0, self.cfg.poll_seconds - (time.time() - started)))
+
+    async def check_once(self) -> None:
+        # The saved position is already past every message in the batch, so one message that
+        # cannot be handled is logged and skipped; it must not take the rest of the batch with it.
+        for item in await asyncio.to_thread(self.box.fetch_new):
+            try:
+                await self.handle(item)
+            except Exception as exc:
+                log.warning("email uid %s could not be handled: %s", item.uid, exc.__class__.__name__)
+                self.store.log_event(channel="email", kind="mail", outcome="rejected", reason="internal_error",
+                                     bytes=item.size, received_ts=item.internal_ts, picked_ts=item.picked_ts,
+                                     detail=f"uid={item.uid} {exc.__class__.__name__}")
+        self.store.kv_set("imap_last_ok", time.time())
 
     async def handle(self, item: FetchedMail) -> None:
         if item.oversize or item.raw is None:

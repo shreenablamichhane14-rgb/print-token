@@ -97,3 +97,45 @@ def test_a_different_mailbox_starts_fresh(tmp_path, store):
     second = Mailbox(cfg(tmp_path, "printbox@gmail.com"), store, connect=FakeIMAP(old_mail))
     assert second.fetch_new() == []                  # does not reuse oldbox's position
     assert store.kv_get("imap:printbox@gmail.com:last_uid") == "20"
+
+
+# "To: <" makes the email package raise IndexError (Python 3.11 and 3.12). Anyone can send it to
+# the base address, no +tag needed.
+POISON = b"From: x@evil.example\nTo: <\nSubject: hi\n\nhello\n"
+
+
+def test_a_malformed_address_header_does_not_stop_the_mailbox(tmp_path, store):
+    fake = FakeIMAP({1: TAGGED})
+    box = Mailbox(cfg(tmp_path), store, connect=fake)
+    assert box.fetch_new() == []
+    fake.messages[2] = POISON
+    fake.messages[3] = TAGGED                    # a real print request right behind it
+    assert [m.uid for m in box.fetch_new()] == [3]
+    assert store.kv_get("imap:printbox@gmail.com:last_uid") == "3"
+
+
+def test_a_malformed_from_header_parses_with_no_sender():
+    from printtoken import mailparse
+    raw = b"From: <\nTo: printbox+abcdefgh@gmail.com\n\nhello\n"
+    mail = mailparse.parse(raw, "printbox", "gmail.com")
+    assert mail.from_addr == "" and mail.tags == ["abcdefgh"]
+
+
+def test_one_mail_that_fails_does_not_drop_the_rest_of_the_batch(tmp_path, store):
+    import asyncio
+    from printtoken.mailwatch import FetchedMail, MailWatcher
+
+    items = [FetchedMail(5, b"bad", 3, None, 0.0), FetchedMail(6, b"good", 4, None, 0.0)]
+    watcher = MailWatcher(cfg(tmp_path), store, tokens=None, pipeline=None, notify_owner=None, limiter=None)
+    watcher.box.fetch_new = lambda: items
+    handled = []
+
+    async def handle(item):
+        if item.raw == b"bad":
+            raise IndexError("string index out of range")
+        handled.append(item.uid)
+
+    watcher.handle = handle
+    asyncio.run(watcher.check_once())
+    assert handled == [6]
+    assert store.query("SELECT reason, detail FROM events") == [("internal_error", "uid=5 IndexError")]
