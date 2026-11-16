@@ -298,7 +298,7 @@ def test_when_is_portable():
 
 def test_stranger_chatter_is_silent_and_never_a_strike(tmp_path, store, tokens):
     bot, tg, _ = make_guest_bot(tmp_path, store, tokens)
-    for text in ("hello", "/start", "/print 482913", "yes please do"):
+    for text in ("hello", "/started", "/print 482913", "yes please do"):
         run(bot.handle(msg(user=STRANGER, text=text)))
     assert tg.sent == [] and tg.deleted == []
     assert [r[0] for r in store.query("SELECT reason FROM events")] == ["not_allowlisted"] * 4
@@ -306,6 +306,40 @@ def test_stranger_chatter_is_silent_and_never_a_strike(tmp_path, store, tokens):
     tag, _ = issue(tokens)
     run(bot.handle(msg(user=STRANGER, text=display_key(tag))))          # chatter never blocks a real key
     assert to(tg, STRANGER)[0].startswith("Key accepted")
+
+
+def test_start_from_a_stranger_gets_one_line_that_asks_for_the_key(tmp_path, store, tokens):
+    bot, tg, _ = make_guest_bot(tmp_path, store, tokens)
+    run(bot.handle(msg(user=STRANGER, text="/start")))
+    asked = to(tg, STRANGER)
+    assert len(asked) == 1 and "one-time key" in asked[0] and "PT-ABCD-EFGH-IJKL" in asked[0]
+    assert to(tg, OWNER) == [] and tg.deleted == []                      # the owner's phone stays quiet
+    assert bot.key_guard.count(STRANGER) == 0                           # asking is never a strike
+    assert store.query("SELECT kind, outcome FROM events") == [("guest", "asked")]
+    tag, _ = issue(tokens)
+    run(bot.handle(msg(user=STRANGER, text=display_key(tag))))          # the key, sent after the bot asked
+    assert to(tg, STRANGER)[1].startswith("Key accepted")
+
+
+def test_start_is_answered_a_few_times_an_hour_and_then_not_at_all(tmp_path, store, tokens):
+    bot, tg, _ = make_guest_bot(tmp_path, store, tokens)
+    for _ in range(GUEST_REPLIES_PER_HOUR + 4):
+        run(bot.handle(msg(user=STRANGER, text="/start")))
+    assert len(to(tg, STRANGER)) == GUEST_REPLIES_PER_HOUR and to(tg, OWNER) == []
+
+
+def test_start_gets_silence_when_guest_keys_are_off(tmp_path, store, tokens):
+    bot, tg, _ = make_guest_bot(tmp_path, store, tokens, guest_enabled=False)
+    run(bot.handle(msg(user=STRANGER, text="/start")))
+    assert tg.sent == [] and store.scalar("SELECT reason FROM events") == "not_allowlisted"
+
+
+def test_one_page_is_not_called_pages(tmp_path, store, tokens):
+    bot, tg, _ = make_guest_bot(tmp_path, store, tokens, guest_page_cap=1)
+    tag, expires = issue(tokens)
+    assert "up to 1 page." in invite_text(tag, expires, "printtokenbot", 1)
+    run(bot.handle(msg(user=STRANGER, text=display_key(tag))))
+    assert "up to 1 page." in to(tg, STRANGER)[0] and "1 pages" not in to(tg, STRANGER)[0]
 
 
 def test_wrong_key_is_silent_and_counted(tmp_path, store, tokens):
@@ -497,7 +531,8 @@ def test_invite_success_with_mail_off(tmp_path, store, tokens):
     assert tg.deleted == [5]
     key = tokens.guest_keys()[0]
     shown = display_key(key.tag)
-    assert f"<code>{shown}</code>" in block and f"https://t.me/printtokenbot?start={shown}" in block
+    assert f"<code>{shown}</code>" in block and "https://t.me/printtokenbot " in block
+    assert "?start=" not in block and "The bot asks for your key" in block
     assert when(key.expires) in block and "up to 5 pages" in block
     assert "the guest from work" not in block and "Forward" not in block and "@" not in block
     assert tg.modes == ["HTML", None]
@@ -511,7 +546,9 @@ def test_invite_with_mail_on_carries_the_address(tmp_path, store, tokens):
     run(bot.handle(msg(text=f"/invite {PIN}")))
     block = to(tg, OWNER)[0]
     tag = tokens.guest_keys()[0].tag
-    assert f"<code>printbox+{tag}@gmail.com</code>" in block and "one email only" in block
+    assert "<code>printbox+print@gmail.com</code>" in block and f"printbox+{tag}@" not in block
+    assert "paste the key into the subject or the body" in block and "one email only" in block
+    assert "in Telegram or by email, not both" in block
 
 
 def test_invite_without_a_bot_username_still_works(tmp_path, store, tokens):

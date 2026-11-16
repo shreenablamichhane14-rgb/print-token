@@ -12,6 +12,8 @@ from pathlib import Path
 
 from dotenv import dotenv_values
 
+from .mailparse import REQUEST_TAG
+
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -60,6 +62,11 @@ class Config:
 
     def address_for(self, tag: str) -> str:
         return f"{self.mail_local}+{tag}@{self.mail_domain}"
+
+    @property
+    def request_address(self) -> str:
+        """Where a guest sends a file by email, with the key pasted into the subject or the body."""
+        return self.address_for(REQUEST_TAG)
 
 
 def _ids(value: str) -> frozenset[int]:

@@ -3,6 +3,7 @@ be from, what Gmail's own servers concluded about SPF, DKIM and DMARC, and the a
 """
 from __future__ import annotations
 
+import html
 import re
 from dataclasses import dataclass, field
 from email import policy
@@ -17,6 +18,11 @@ GMAIL_DOMAINS = {"gmail.com", "googlemail.com"}
 TAG_HEADERS = ("To", "Cc", "Delivered-To", "X-Original-To")
 # A result is "method=result" at the very start of one ;-separated piece of the header.
 _METHOD = re.compile(r"\s*(dkim|spf|dmarc|arc)\s*=\s*([a-z]+)", re.I)
+# The address a guest writes to when the key goes into the subject or the body: box+print@...
+# Five letters, so it is shaped like neither a one-time tag (8) nor a guest key (12).
+REQUEST_TAG = "print"
+_HTML_TAG = re.compile(r"<[^>]{0,500}>")
+BODY_TEXT_LIMIT = 20000         # characters of the message text that are searched for a key
 
 
 @dataclass
@@ -35,6 +41,7 @@ class ParsedMail:
     subject: str = ""
     date_ts: float | None = None
     message_id: str = ""
+    text: str = ""                  # the words of the message itself, where a guest may paste the key
 
 
 def canonical_local(local: str, domain: str) -> str:
@@ -132,6 +139,36 @@ def _resinfo_parts(text: str) -> list[str]:
     return parts
 
 
+def subject_of(msg: EmailMessage) -> str:
+    """The Subject as plain text, or nothing when the header cannot be read."""
+    try:
+        return str(msg.get("Subject", "") or "")
+    except Exception:
+        return ""
+
+
+def body_text(msg: EmailMessage, limit: int = BODY_TEXT_LIMIT) -> str:
+    """The words of the message itself, not its attachments: where a guest may have pasted the
+    key. Plain text when there is any, otherwise the HTML with its tags taken out. Cut at `limit`
+    characters. Never raises: a body that cannot be read counts as an empty one, because any
+    stranger can send any bytes to the mailbox."""
+    try:
+        part = msg.get_body(preferencelist=("plain", "html"))
+        if part is None:
+            return ""
+        try:
+            text = part.get_content()
+        except Exception:
+            text = (part.get_payload(decode=True) or b"").decode("utf-8", "replace")
+        if not isinstance(text, str):
+            return ""
+        if part.get_content_type() == "text/html":
+            text = html.unescape(_HTML_TAG.sub(" ", text))
+        return text[:limit]
+    except Exception:
+        return ""
+
+
 def attachments(msg: EmailMessage) -> list[Attachment]:
     out = []
     for part in msg.iter_attachments():
@@ -155,9 +192,10 @@ def parse(raw: bytes, base_local: str, base_domain: str) -> ParsedMail:
         from_addr=from_addr,
         auth=provider_auth_results(msg),
         attachments=attachments(msg),
-        subject=str(msg.get("Subject", "")),
+        subject=subject_of(msg),
         date_ts=date_ts,
         message_id=str(msg.get("Message-ID", "")),
+        text=body_text(msg),
     )
 
 

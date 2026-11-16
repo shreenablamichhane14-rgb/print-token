@@ -60,6 +60,9 @@ def cfg(tmp_path, user="printbox@gmail.com"):
 
 TAGGED = make_mail(to="printbox+abcdefgh@gmail.com")
 OTHER = make_mail(to="someone@example.com")
+KEY_IN_SUBJECT = make_mail(to="printbox@gmail.com", subject="my page PT-ABCD-EFGH-IJKL")
+TO_REQUEST = make_mail(to="printbox+print@gmail.com", body="the key is PT-ABCD-EFGH-IJKL")
+PLAIN = make_mail(to="printbox@gmail.com", subject="your bank info", body="PT-ABCD-EFGH-IJKL")
 
 
 def test_first_check_only_sets_the_starting_point(tmp_path, store):
@@ -79,6 +82,16 @@ def test_only_tagged_new_mail_is_downloaded(tmp_path, store):
     assert [m.uid for m in found] == [2]
     assert server.body_fetches == [2]                # untagged mail: headers only, never the body
     assert found[0].internal_ts == 1792922400.0
+
+
+def test_a_key_in_the_subject_or_mail_to_the_request_address_is_downloaded(tmp_path, store):
+    server = FakeIMAP({1: OTHER})
+    box = Mailbox(cfg(tmp_path), store, connect=server)
+    box.fetch_new()
+    server.messages.update({2: KEY_IN_SUBJECT, 3: PLAIN, 4: TO_REQUEST, 5: OTHER})
+    assert [m.uid for m in box.fetch_new()] == [2, 4]
+    # Mail to the plain address with nothing in its subject is never opened, whatever its body says.
+    assert server.body_fetches == [2, 4]
 
 
 def test_uid_quirk_does_not_repeat_the_last_message(tmp_path, store):

@@ -2,8 +2,9 @@
 connection: Python's imaplib has no IDLE, and half a minute is fine for printing.
 
 imaplib blocks, so every IMAP call runs in a worker thread through asyncio.to_thread and the event
-loop never waits on the network. Only the headers of new mail are downloaded first; the full
-message is fetched only when it was sent to one of our +tag addresses.
+loop never waits on the network. Only a few headers of new mail are downloaded first (who it was
+sent to, and the subject); the full message is fetched only when it was sent to one of our +tag
+addresses or carries a guest key in its subject. Other mail in the box is never opened.
 """
 from __future__ import annotations
 
@@ -22,7 +23,7 @@ from .messages import describe, should_notify_mail
 from .pipeline import Pipeline, PrintJob
 from .policy import RateLimiter, decide_mail
 from .store import Store
-from .tokens import Tokens, mask
+from .tokens import Tokens, find_key, mask
 
 log = logging.getLogger("printtoken.mail")
 
@@ -30,7 +31,7 @@ MONTHS = {m: i for i, m in enumerate(
     ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"), start=1)}
 _SIZE = re.compile(rb"RFC822\.SIZE (\d+)")
 _IDATE = re.compile(rb'INTERNALDATE "([^"]+)"')
-HEADER_FETCH = "(UID RFC822.SIZE INTERNALDATE BODY.PEEK[HEADER.FIELDS (TO CC DELIVERED-TO X-ORIGINAL-TO)])"
+HEADER_FETCH = "(UID RFC822.SIZE INTERNALDATE BODY.PEEK[HEADER.FIELDS (TO CC DELIVERED-TO X-ORIGINAL-TO SUBJECT)])"
 
 
 def internaldate_ts(value: bytes) -> float | None:
@@ -138,7 +139,10 @@ class Mailbox:
             meta, headers = _literal(data)
             if typ == "OK" and headers:
                 msg = mailparse.parse_headers(headers)
-                if mailparse.find_tags(msg, self.cfg.mail_local, self.cfg.mail_domain):
+                # A +tag address (a one-time address, a guest key, or box+print@ with the key in
+                # the text), or a guest key in the subject of mail to the plain address.
+                if (mailparse.find_tags(msg, self.cfg.mail_local, self.cfg.mail_domain)
+                        or (self.cfg.guest_enabled and find_key(mailparse.subject_of(msg), bare=False))):
                     found.append(self._fetch_body(imap, uid, meta))
             self.store.kv_set(f"{self._key}:last_uid", uid)
         return found

@@ -37,7 +37,8 @@ def make_png(size=(400, 300), color=(200, 30, 30)) -> bytes:
 
 def make_mail(to: str = f"{BASE}+abcdefgh@{DOMAIN}", frm: str = "Alice <alice@example.com>",
               auth: str | None = GOOD_AUTH, lower_auth: str | None = None,
-              attachments=None, cc: str | None = None, delivered_to: str | None = None) -> bytes:
+              attachments=None, cc: str | None = None, delivered_to: str | None = None,
+              subject: str = "print this", body: str = "see attached", html: str | None = None) -> bytes:
     msg = EmailMessage()
     if auth is not None:
         msg["Authentication-Results"] = auth          # Gmail puts its own header on top
@@ -49,10 +50,13 @@ def make_mail(to: str = f"{BASE}+abcdefgh@{DOMAIN}", frm: str = "Alice <alice@ex
     msg["To"] = to
     if cc:
         msg["Cc"] = cc
-    msg["Subject"] = "print this"
+    msg["Subject"] = subject
     msg["Date"] = formatdate(localtime=True)
     msg["Message-ID"] = "<test@example.com>"
-    msg.set_content("see attached")
+    if html is not None:
+        msg.set_content(html, subtype="html")        # a mail program that sends no plain text part
+    else:
+        msg.set_content(body)
     if attachments is None:
         attachments = [("doc.pdf", "application/pdf", make_pdf())]
     for name, ctype, data in attachments:

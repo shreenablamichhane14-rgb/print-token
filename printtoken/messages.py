@@ -3,6 +3,7 @@
 REASON_TEXT = {
     "no_tag": "it was not sent to a +tag print address",
     "malformed_tag": "the +tag is not a print address",
+    "no_key": "no guest key was found in the subject or the body",
     "unknown_tag": "that print address or key was never issued",
     "expired_tag": "that print address or key had expired",
     "replayed_tag": "that print address or key was already used",

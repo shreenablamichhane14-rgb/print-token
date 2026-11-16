@@ -2,8 +2,9 @@ from conftest import BASE, DOMAIN, GOOD_AUTH, make_mail, make_png
 
 from printtoken import mailparse
 from printtoken.mailwatch import internaldate_ts
+from printtoken.messages import should_notify_mail
 from printtoken.policy import RateLimiter, decide_mail
-from printtoken.tokens import Verdict
+from printtoken.tokens import Verdict, display_key
 
 ACCEPT = frozenset({"pass"})
 
@@ -165,3 +166,100 @@ def test_injected_dmarc_text_cannot_pass_the_allowlist(tokens):
 def test_comments_are_skipped_but_results_after_them_are_read():
     auth = "mx.google.com; dkim=pass (good (nested) signature) header.i=@example.com; dmarc=pass (p=NONE)"
     assert parse(make_mail(auth=auth)).auth == {"dkim": "pass", "dmarc": "pass"}
+
+
+# --- a guest key pasted into the subject or the body --------------------------------------------
+
+REQUEST = f"{BASE}+print@{DOMAIN}"
+
+
+def guest_key(tokens):
+    tag, _ = tokens.mint_guest("tg:1", "prof", 7)
+    return tag, display_key(tag)
+
+
+def test_key_in_the_subject_is_held_for_one_guest_print(tokens):
+    tag, shown = guest_key(tokens)
+    decision = decide_mail(parse(make_mail(to=REQUEST, subject=f"my page {shown}")), tokens, ACCEPT)
+    assert decision.ok and decision.guest and decision.tag == tag and len(decision.files) == 1
+    assert tokens.check(tag) is Verdict.RESERVED             # held for this one print, not burned
+
+
+def test_key_in_the_body_works_too(tokens):
+    tag, shown = guest_key(tokens)
+    body = f"Hello,\n\nhere is my file. The key is {shown.lower()}\n\nThanks,\nTim\n"
+    decision = decide_mail(parse(make_mail(to=REQUEST, subject="one page", body=body)), tokens, ACCEPT)
+    assert decision.ok and decision.guest and decision.tag == tag
+
+
+def test_key_in_a_body_that_is_only_html(tokens):
+    tag, shown = guest_key(tokens)
+    page = f"<html><body><p>Key: <b>{shown[:7]}</b>{shown[7:]}</p><br>sent from my phone</body></html>"
+    mail = parse(make_mail(to=REQUEST, subject="print", html=page))
+    assert "<b>" not in mail.text and decide_mail(mail, tokens, ACCEPT).tag == tag
+
+
+def test_key_in_the_subject_needs_no_special_address(tokens):
+    tag, shown = guest_key(tokens)
+    decision = decide_mail(parse(make_mail(to=f"{BASE}@{DOMAIN}", subject=shown)), tokens, ACCEPT)
+    assert decision.ok and decision.guest and decision.tag == tag
+
+
+def test_request_address_without_a_key_is_turned_away_quietly(tokens):
+    guest_key(tokens)
+    decision = decide_mail(parse(make_mail(to=REQUEST)), tokens, ACCEPT)
+    assert not decision.ok and decision.reason == "no_key" and not should_notify_mail("no_key")
+
+
+def test_ordinary_words_are_never_taken_for_a_key(tokens):
+    guest_key(tokens)
+    plain = f"{BASE}@{DOMAIN}"
+    assert decide_mail(parse(make_mail(to=plain, subject="your bank info")), tokens, ACCEPT).reason == "no_tag"
+    assert decide_mail(parse(make_mail(to=plain, subject="abcdefghijkl")), tokens, ACCEPT).reason == "no_tag"
+    looks_like = decide_mail(parse(make_mail(to=plain, subject="PT team meet soon")), tokens, ACCEPT)
+    assert looks_like.reason == "unknown_tag" and not should_notify_mail("unknown_tag")
+
+
+def test_a_pasted_key_still_needs_the_sender_check_and_is_not_used_up_by_a_forgery(tokens):
+    tag, shown = guest_key(tokens)
+    forged = make_mail(to=REQUEST, subject=shown, auth="mx.google.com; spf=fail; dmarc=fail header.from=example.com")
+    assert decide_mail(parse(forged), tokens, ACCEPT).reason == "dmarc_fail"
+    assert tokens.check(tag) is Verdict.OK
+    assert decide_mail(parse(make_mail(to=REQUEST, subject=shown)), tokens, ACCEPT).ok
+
+
+def test_a_pasted_key_works_once(tokens):
+    tag, shown = guest_key(tokens)
+    assert decide_mail(parse(make_mail(to=REQUEST, subject=shown)), tokens, ACCEPT).ok
+    again = decide_mail(parse(make_mail(to=REQUEST, body=shown)), tokens, ACCEPT)
+    assert not again.ok and again.reason == Verdict.RESERVED.value
+    tokens.spend(tag)
+    assert decide_mail(parse(make_mail(to=REQUEST, subject=shown)), tokens, ACCEPT).reason == "replayed_tag"
+
+
+def test_a_pasted_key_without_a_file_or_with_a_word_file_costs_nothing(tokens):
+    tag, shown = guest_key(tokens)
+    assert decide_mail(parse(make_mail(to=REQUEST, subject=shown, attachments=[])), tokens, ACCEPT).reason == "no_attachment"
+    word = [("a.docx", "application/zip", b"PK\x03\x04" + b"0" * 50)]
+    assert decide_mail(parse(make_mail(to=REQUEST, subject=shown, attachments=word)), tokens, ACCEPT).reason == "unsupported_type"
+    assert tokens.check(tag) is Verdict.OK
+
+
+def test_pasted_keys_are_ignored_when_guest_keys_are_off(tokens):
+    tag, shown = guest_key(tokens)
+    off = decide_mail(parse(make_mail(to=REQUEST, subject=shown)), tokens, ACCEPT, guest_enabled=False)
+    assert not off.ok and off.reason == "no_key" and tokens.check(tag) is Verdict.OK
+
+
+def test_a_one_time_address_still_wins_over_text(tokens):
+    tag, mail = live_mail(tokens, subject="PT-ABCD-EFGH-IJKL")
+    decision = decide_mail(mail, tokens, ACCEPT)
+    assert decision.ok and decision.tag == tag and not decision.guest
+
+
+def test_a_body_that_cannot_be_read_is_an_empty_one():
+    raw = (b"From: a@example.com\nTo: printbox+print@gmail.com\nSubject: x\n"
+           b'Content-Type: text/plain; charset="no-such-charset"\nContent-Transfer-Encoding: base64\n\n'
+           b"!!!not base64!!!\n")
+    mail = parse(raw)
+    assert mail.tags == ["print"] and isinstance(mail.text, str)

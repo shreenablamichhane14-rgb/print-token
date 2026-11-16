@@ -37,7 +37,7 @@ from .tokens import KEY_LEN, KeyRecord, MintRefused, Tokens, display_key, mask, 
 BOT_NAME = "Print Token"
 # What a guest reads before pressing Start, so it has to make sense to someone holding a key.
 BOT_DESCRIPTION = ("Prints files on the owner's home printer. If the owner gave you a key, press Start, "
-                   "send the key here, then send your file as a File.")
+                   "send the key when the bot asks for it, then send your file as a File.")
 BOT_SHORT = "Prints files at home. Needs a key from the owner."
 
 
@@ -273,7 +273,7 @@ def cmd_guest(args) -> int:
         return 1
     store.log_event(channel="local", kind="guest", outcome="minted", sender="local",
                     detail=f"tag={mask(tag)} note={note}")
-    address = cfg.address_for(tag) if cfg.mail_enabled else None
+    address = cfg.request_address if cfg.mail_enabled else None
     print(invite_text(tag, expires, _bot_username(cfg), min(cfg.guest_page_cap, cfg.page_cap), address))
     print(f"\nNote: {note or 'none'}. Forward the block above to the guest. The gateway "
           f"(python -m printtoken run) has to be running for the key to answer.")

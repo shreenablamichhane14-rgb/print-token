@@ -4,10 +4,12 @@ Order matters. The token is checked first (cheap, and most junk stops there), th
 authenticated, and only THEN is the token burned. If the burn came first, anyone who saw a live
 address could burn it with a forged message and the real sender would be locked out.
 
-A guest key arriving by email (box+<12 characters>@...) goes through the same first two steps and
-is then held for one print rather than burned, after its one attachment has been looked at, so a
-Word file or an empty email costs the guest nothing. The sender allowlist does not apply to a
-guest: the key is the permission, and the DMARC check has already run.
+A guest key arriving by email goes through the same first two steps and is then held for one print
+rather than burned, after its one attachment has been looked at, so a Word file or an empty email
+costs the guest nothing. The sender allowlist does not apply to a guest: the key is the
+permission, and the DMARC check has already run. The key can be the +tag of the address
+(box+<12 characters>@...) or be pasted into the subject or the body, which is what the invitation
+tells a guest to do (mail to box+print@..., key in the subject or the body).
 """
 from __future__ import annotations
 
@@ -16,8 +18,8 @@ from collections import defaultdict, deque
 from dataclasses import dataclass, field
 
 from . import convert
-from .mailparse import Attachment, ParsedMail
-from .tokens import Tokens, Verdict, is_tag_shaped
+from .mailparse import REQUEST_TAG, Attachment, ParsedMail
+from .tokens import Tokens, Verdict, find_key, is_tag_shaped
 
 MAX_ATTACHMENTS = 5
 PRINTABLE = ("pdf", "png", "jpeg", "text")
@@ -36,10 +38,16 @@ def decide_mail(mail: ParsedMail, tokens: Tokens, dmarc_accept: frozenset[str],
                 sender_allowlist: frozenset[str] = frozenset(), now: float | None = None,
                 guest_enabled: bool = True) -> Decision:
     now = time.time() if now is None else now
-    if not mail.tags:
-        return Decision(False, "no_tag")
     tag = next((t for t in mail.tags if is_tag_shaped(t)), None)
+    if tag is None and guest_enabled:
+        # No one-time address. A guest may have pasted the key into the subject or the body
+        # instead, with the mail sent to box+print@... or to the plain address.
+        tag = pasted_key(mail)
     if tag is None:
+        if not mail.tags:
+            return Decision(False, "no_tag")
+        if REQUEST_TAG in mail.tags:
+            return Decision(False, "no_key", REQUEST_TAG)
         return Decision(False, "malformed_tag", mail.tags[0])
     verdict = tokens.check(tag, now)
     if verdict is not Verdict.OK:
@@ -61,6 +69,12 @@ def decide_mail(mail: ParsedMail, tokens: Tokens, dmarc_accept: frozenset[str],
     if len(files) > MAX_ATTACHMENTS:
         return Decision(False, "too_many_attachments", tag)
     return Decision(True, "accepted", tag, files)
+
+
+def pasted_key(mail: ParsedMail) -> str | None:
+    """A guest key written into the subject or the body, or None. Only the PT-ABCD-EFGH-IJKL form
+    counts here: a subject of three short words ("your bank info") must never be read as a key."""
+    return find_key(mail.subject or "", bare=False) or find_key(mail.text or "", bare=False)
 
 
 def _decide_guest(mail: ParsedMail, tokens: Tokens, tag: str, now: float, guest_enabled: bool) -> Decision:

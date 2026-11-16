@@ -75,6 +75,9 @@ GUEST_REPLIES_PER_HOUR = 6      # answers to a guest who is not sending a file, 
 GUEST_FAILURES_PER_KEY = 3      # failed prints before a key is closed
 GUEST_FILES_PER_HOUR = 10       # files looked at for one guest account, printable or not, then silence
 LOCKOUT_NOTICE_EVERY = 86400    # seconds between two lockout notices to the owner about one account
+# The one thing a stranger without a key is told, and only after pressing Start.
+ASK_FOR_KEY = ("This is Print Token. If you were given a one-time key, send it here as a message now. "
+               "It looks like PT-ABCD-EFGH-IJKL.")
 
 
 def when(ts: float) -> str:
@@ -104,20 +107,22 @@ def invite_text(tag: str, expires: float, username: str | None, page_cap: int,
         return html.escape(s) if html_mode else s
 
     if username:
-        how = (f"Tap https://t.me/{username}?start={key} and press Start. If nothing happens, send the key "
-               f"to the bot as a message.")
+        how = (f"Open https://t.me/{username} in Telegram and press Start. The bot asks for your key: "
+               f"send it as a message.")
     else:
-        how = "Open the Print Token bot in Telegram, press Start, then send the key as a message."
+        how = ("Open the Print Token bot in Telegram and press Start. The bot asks for your key: "
+               "send it as a message.")
     lines = [f"Print Token guest key: {code(key)}",
              text(how),
-             text(f"Then send your file as a File (paperclip, then File): a PDF or a picture, up to {page_cap} "
-                  f"pages. Word files: export to PDF first."),
+             text(f"Then send your file as a File (paperclip, then File): a PDF or a picture, up to "
+                  f"{_pages(page_cap)}. Word files: export to PDF first."),
              text(f"Good for one print until {when(expires)}. If the bot does not answer within a minute, "
                   f"tell the person who sent you this key.")]
     if address:
-        lines.append(f"Or email the file to {code(address)} from your own email address, one email only. "
-                     f"You will not get an email back; the person who sent you this key gets the confirmation "
-                     f"and will let you know.")
+        lines.append(f"Or email the file as an attachment to {code(address)} and paste the key into the "
+                     f"subject or the body, from your own email address, one email only. The key works once, "
+                     f"in Telegram or by email, not both. You will not get an email back; the person who sent "
+                     f"you this key gets the confirmation and will let you know.")
     return "\n".join(lines)
 
 
@@ -368,8 +373,8 @@ class Bot:
 
     def _welcome(self, expires: float) -> str:
         return (f"Key accepted, I removed it from the chat. Now send your file (again, if you sent it before "
-                f"the key): tap the paperclip, choose File, and pick a PDF or a picture, up to {self.guest_cap} "
-                f"pages. A photo works too. Word files will not print, export them to PDF first. "
+                f"the key): tap the paperclip, choose File, and pick a PDF or a picture, up to "
+                f"{_pages(self.guest_cap)}. A photo works too. Word files will not print, export them to PDF first. "
                 f"This key is good for one print until {when(expires)}.")
 
     @staticmethod
@@ -396,7 +401,8 @@ class Bot:
 
     async def stranger(self, msg: dict, user: int, chat: int) -> None:
         """Everything from an account that is not on the allowlist. Silence is the rule; the only
-        things answered are a guest key and the account that redeemed one."""
+        things answered are a guest key, the account that redeemed one, and the Start button,
+        which gets one line that asks for the key."""
         who = f"tg:{user}"
         if self.cfg.guest_enabled:
             text = (msg.get("text") or msg.get("caption") or "").strip()
@@ -421,6 +427,13 @@ class Bot:
             if current:                 # their key is used or expired: one line, so they know why
                 verdict = Verdict.USED if current.state == "used" else Verdict.EXPIRED
                 await self._guest_reply(user, chat, self._key_problem(verdict, current))
+                return
+            if _command(text) == "/start":
+                # Pressing Start is how a person who was given a key begins, so this one command
+                # is answered: one line that asks for the key, a few times an hour per account and
+                # then silence like everything else. It is no strike, and the owner is not told.
+                self.store.log_event(channel="telegram", kind="guest", outcome="asked", sender=who)
+                await self._guest_reply(user, chat, ASK_FOR_KEY)
                 return
         # No reply at all, so a stranger learns nothing about what the bot does.
         self.store.log_event(channel="telegram", kind="message", outcome="rejected",
@@ -661,7 +674,7 @@ class Bot:
                              detail=f"tag={mask(tag)} note={note}")
         if not self.username:
             log.warning("bot username unknown, the invite carries no deep link")
-        address = self.cfg.address_for(tag) if self.cfg.mail_enabled else None
+        address = self.cfg.request_address if self.cfg.mail_enabled else None
         block = invite_text(tag, expires, self.username, self.guest_cap, address, html_mode=True)
         sent = await self.tg.send(chat, block, parse_mode="HTML")
         if sent:
