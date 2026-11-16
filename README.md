@@ -21,7 +21,8 @@ service, so it stays on all the time.
 ```
 
 - **Telegram:** an allowlisted Telegram account sends a PDF, PNG, JPEG or .txt *as a file* and it
-  prints. Messages from anybody else get no reply at all, unless they carry a guest key (below).
+  prints. Messages from anybody else get no reply at all, unless they carry a guest key (below);
+  the one exception is the Start button, which is answered with one line asking for the key.
 - **Typed notes:** plain text typed into the bot is tidied into a clean page (a short first line
   on its own becomes the title, `- ` and `1. ` lines stay a list, lines pressed apart by the phone
   are joined back) and laid out by PyMuPDF's Story engine in a Times-style serif (Nimbus Roman)
@@ -43,13 +44,13 @@ service, so it stays on all the time.
 
 | | Telegram | Email |
 |---|---|---|
-| Who can print | allowlisted Telegram user ids only; strangers get silence | only mail sent to a live one-time `+tag`; everything else is ignored after reading headers |
+| Who can print | allowlisted Telegram user ids only; strangers get silence (Start gets one line asking for a key) | only mail sent to a live one-time `+tag`, or carrying a live guest key; everything else is ignored after reading a few headers |
 | Forged sender | not possible, Telegram proves the account | rejected unless Gmail's top `Authentication-Results` says `dmarc=pass` |
 | Spam | | Gmail's spam filter runs first (the gateway only reads the inbox); unknown tags are logged, not answered |
 | Addresses | `/print` needs a PIN, 5 wrong tries locks it for an hour | 30 minutes, one use, 3 live at most, 3 new per hour |
 | Files | PDF, PNG, JPEG, plain text only (detected from the bytes); 20 MB | same types; 25 MB; at most 5 attachments |
 | Volume | 20 prints an hour, 20 pages per file, queue of 10 | same limits, same queue |
-| Guest key | one outside person redeems a 12-character key (60 bits) once; 10 wrong keys from one account, then an hour of silence; answers to a guest's chatter: 6 an hour | the same key as `box+<key>@gmail.com`, one attachment, DMARC still required, the sender allowlist not applied |
+| Guest key | one outside person redeems a 12-character key (60 bits) once; 10 wrong keys from one account, then an hour of silence; answers to a guest's chatter: 6 an hour | the same key pasted into the subject or the body of a mail to `box+print@gmail.com` (or as `box+<key>@gmail.com`), one attachment, DMARC still required, the sender allowlist not applied |
 | Guest volume | 2 live keys, 7 days, one print of 5 pages, 5 guest prints an hour on their own budget, 10 files an hour looked at per guest account, 3 failed prints close the key | same key, same page cap, the shared hourly print limit |
 
 ## Guest key
@@ -61,17 +62,19 @@ whichever one prints first spends it.
 
 **Issuing one.** In Telegram, `/invite <PIN> <note>` (the note is for the owner only: say who the
 key is for). The bot deletes the message with the PIN and sends two replies: a block to forward to
-the guest exactly as it is (the key as a tap-to-copy code span, a `t.me/<bot>?start=<key>` link
-that hands the key over when the guest presses Start, the expiry, and the email address once mail
-is on), then an owner-only note. The bot removes its own copy of the block once the key is claimed
+the guest exactly as it is (the key as a tap-to-copy code span, a `t.me/<bot>` link, the expiry,
+and the email address once mail is on), then an owner-only note. A link of the form
+`t.me/<bot>?start=<key>` still works and hands the key over when the guest presses Start. The bot removes its own copy of the block once the key is claimed
 or finished (Telegram allows that for 48 hours). Without a PIN on the gateway,
 `python -m printtoken guest --note "..."` prints the same block on the laptop. `guests` lists the
 keys with their state (live, claimed, printing, used, expired) and `revoke` closes one early, given
 the full key or just the first characters `guests` shows (the full key is shown only once).
 
-**What the guest sees.** Nothing until they send the key: a stranger's messages get silence, as
-before. The key is found inside whatever they send (the forwarded invite, the deep link's `/start`
-payload, a key with a sentence around it, en dashes, a trailing period, a `0` typed for `O`). A
+**What the guest sees.** They press Start and the bot asks for the key in one line (at most 6
+times an hour per account; it is no strike and the owner is not told). Anything else a stranger
+sends still gets silence. The key is found inside whatever they send (the forwarded invite, a
+deep link's `/start` payload, a key with a sentence around it, en dashes, a trailing period, a
+`0` typed for `O`). A
 right key is deleted from the chat and answered with what to send next, and the owner is told who
 claimed it. Then one file, as a File or as a photo. Word files are turned away before the key is
 touched, with instructions to export a PDF. The guest gets "Got <name>, checking it now" and then
@@ -92,11 +95,15 @@ the top of `printtoken/telegram.py`, not config: `GUEST_PRINTS_PER_HOUR` (5),
 `GUEST_FAILURES_PER_KEY` (3). `enabled = false` turns the whole thing off, including keys already
 issued.
 
-**By email, once mail is on.** The invite also carries `box+<12 characters>@gmail.com`. The guest
-emails the file from their own address (Gmail's `dmarc=pass` is still required; the sender
-allowlist is not applied to a guest key), one attachment, and gets no email back: the owner's
-Telegram gets the confirmation. A key mid-print on one channel is refused on the other with
-`key_in_use`.
+**By email, once mail is on.** The invite also carries the address `box+print@gmail.com`. The
+guest emails the file there from their own address, as an attachment, and pastes the key into the
+subject or the body (Gmail's `dmarc=pass` is still required; the sender allowlist is not applied
+to a guest key). One attachment, and no email comes back: the owner's Telegram gets the
+confirmation. Only the `PT-ABCD-EFGH-IJKL` form is read from text, so ordinary words are never
+taken for a key. A key in the subject also works at the plain address, and the older form
+`box+<12 characters>@gmail.com` still works. Mail to the plain address is opened only when its
+subject carries a key; the body of other mail is never fetched. A key mid-print on one channel is
+refused on the other with `key_in_use`.
 
 **Before a guest tries it.** 1. `python -m printtoken setpin` once (`/invite` needs it).
 2. `python -m printtoken tgsetup` after this change, so the new description and the per-chat
@@ -123,7 +130,7 @@ first: the expiry times in the messages use the machine's own time zone.
 
 Other commands: `dryrun [--note] FILE`, `mint` (local address, email testing),
 `guest [--days N] [--note TEXT]`, `guests`, `revoke KEY`, `report [--days N] [--csv out.csv]`.
-Tests: `python -m pytest -p no:faulthandler` (140 tests).
+Tests: `python -m pytest -p no:faulthandler` (179 tests).
 
 ## On the Raspberry Pi
 
@@ -271,7 +278,7 @@ property is claimed.
 ```
 printtoken/   config.py store.py tokens.py pins.py mailparse.py policy.py convert.py notes.py printer.py
               pipeline.py telegram.py mailwatch.py messages.py report.py app.py __main__.py
-tests/        140 tests: tokens and guest keys, mail parsing and policy, the mailbox, conversion and
+tests/        179 tests: tokens and guest keys, mail parsing and policy, the mailbox, conversion and
               printing (Windows and CUPS), typed notes, blocking, the bot and the command line
 deploy/       the Raspberry Pi side: install-pi.sh, print-token.service, print-token (the command),
               print-token-wake.service and .timer (the wake-up alarm)
