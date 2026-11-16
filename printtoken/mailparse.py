@@ -66,6 +66,15 @@ def _addresses(msg: EmailMessage, header: str) -> list[tuple[str, str]]:
         return []
 
 
+def is_own_address(addr: str, base_local: str, base_domain: str) -> bool:
+    """True when `addr` is the print mailbox itself, with or without a +tag, dots or capitals."""
+    local, at, domain = (addr or "").strip().lower().rpartition("@")
+    base_domain = base_domain.lower()
+    if not at or not _same_domain(domain, base_domain):
+        return False
+    return canonical_local(local.partition("+")[0], domain) == canonical_local(base_local, base_domain)
+
+
 def find_tags(msg: EmailMessage, base_local: str, base_domain: str) -> list[str]:
     base_domain = base_domain.lower()
     base = canonical_local(base_local, base_domain)

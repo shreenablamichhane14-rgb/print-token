@@ -208,8 +208,18 @@ class MailWatcher:
             self.store.log_event(kind="mail", outcome="rejected", reason=decision.reason,
                                  detail=f"tag={mask(decision.tag)} auth={auth}", **common)
             if should_notify_mail(decision.reason):
+                why = describe(decision.reason)
+                if decision.reason == "dmarc_missing" and mailparse.is_own_address(
+                        mail.from_addr, self.cfg.mail_local, self.cfg.mail_domain):
+                    # The owner trying it out from the mailbox's own account. Gmail checks the
+                    # sender of mail that comes in from outside, not of mail an account sends
+                    # to itself, so there is nothing to go by. Said in plain words, because
+                    # "no authentication result" tells the owner nothing (seen 2026-11-16).
+                    why = ("it was sent from the print mailbox's own address, and Gmail runs no sender "
+                           "check on mail an account sends to itself. Send it from another address; the "
+                           "key or print address is still unused")
                 await self.notify_owner(f"Rejected an email from {mail.from_addr or 'an unknown sender'}: "
-                                        f"{describe(decision.reason)}.")
+                                        f"{why}.")
             return
         self.store.log_event(kind="mail", outcome="accepted", reason="accepted",
                              detail=f"tag={mask(decision.tag)} auth={auth} files={len(decision.files)}"

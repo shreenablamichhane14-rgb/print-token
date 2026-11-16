@@ -6,7 +6,8 @@
     python -m printtoken tgsetup          give the bot its name, description and command menu
     python -m printtoken tgtest           live Telegram round trip, finished with a dry run print
     python -m printtoken mint             make a print address locally (for testing the email path)
-    python -m printtoken guest            make a one-time guest key locally [--days N] [--note TEXT]
+    python -m printtoken guest            make a one-time guest key locally [--days N | --until YYYY-MM-DD]
+                                          [--note TEXT]
     python -m printtoken guests           list guest keys with their state
     python -m printtoken revoke KEY       close a guest key early (the key, or the first characters guests shows)
     python -m printtoken dryrun [--note] FILE   convert FILE (or lay it out as a typed note) and "print"
@@ -256,6 +257,13 @@ def _bot_username(cfg: Config) -> str | None:
         return None
 
 
+def days_until(day: str, now: float | None = None) -> float:
+    """Days from now to the end (23:59:59, this machine's time) of a date written YYYY-MM-DD.
+    Raises ValueError for anything that is not such a date."""
+    end = datetime.strptime(day.strip(), "%Y-%m-%d").replace(hour=23, minute=59, second=59).timestamp()
+    return (end - (time.time() if now is None else now)) / 86400
+
+
 def cmd_guest(args) -> int:
     """A guest key without the bot: the same forwardable block /invite sends, printed here."""
     from .telegram import invite_text
@@ -265,6 +273,15 @@ def cmd_guest(args) -> int:
         return 1
     store, tokens = _tokens_for(cfg)
     days = cfg.guest_key_days if args.days is None else args.days
+    if args.until:
+        try:
+            days = days_until(args.until)
+        except ValueError:
+            print("--until takes a date like 2026-11-23.")
+            return 1
+        if not 0 < days <= 90:
+            print("--until has to be today or a day within the next 90 days.")
+            return 1
     note = (args.note or "").strip()
     try:
         tag, expires = tokens.mint_guest("local", note, days)
@@ -364,6 +381,8 @@ def main(argv: list[str] | None = None) -> int:
     p.set_defaults(func=cmd_dryrun)
     p = sub.add_parser("guest")
     p.add_argument("--days", type=int, default=None, help="days the key stays open (default: [guest] key_days)")
+    p.add_argument("--until", default=None, metavar="YYYY-MM-DD",
+                   help="the last day the key works, to the end of that day (instead of --days)")
     p.add_argument("--note", default="", help="who the key is for, shown only to the owner")
     p.set_defaults(func=cmd_guest)
     sub.add_parser("guests").set_defaults(func=cmd_guests)

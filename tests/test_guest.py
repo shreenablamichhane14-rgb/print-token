@@ -851,3 +851,13 @@ def test_a_guest_who_keeps_sending_files_is_reported_once(tmp_path, store, token
         clock[0] = 1_800_000_000.0 + i * 360
         run(bot.handle(doc("Syllabus.docx", "w")))
     assert len([t for t in to(tg, OWNER) if "files in an hour" in t]) == 1
+
+
+def test_a_key_can_be_given_a_last_day():
+    from printtoken.__main__ import days_until
+    now = datetime(2026, 11, 16, 0, 45, 0).timestamp()
+    days = days_until("2026-11-23", now)
+    assert datetime.fromtimestamp(now + days * 86400) == datetime(2026, 11, 23, 23, 59, 59)
+    assert 0 < days_until("2026-11-16", now) < 1 and days_until("2026-11-15", now) < 0
+    with pytest.raises(ValueError):
+        days_until("23 nov")

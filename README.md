@@ -130,7 +130,7 @@ first: the expiry times in the messages use the machine's own time zone.
 
 Other commands: `dryrun [--note] FILE`, `mint` (local address, email testing),
 `guest [--days N] [--note TEXT]`, `guests`, `revoke KEY`, `report [--days N] [--csv out.csv]`.
-Tests: `python -m pytest -p no:faulthandler` (179 tests).
+Tests: `python -m pytest -p no:faulthandler` (181 tests).
 
 ## On the Raspberry Pi
 
@@ -162,7 +162,7 @@ A fresh install has no secrets, so the script ends by naming the three lines to 
 ```
 print-token selftest            printer, bot and PIN checks
 print-token setpin              set the PIN, then the gateway restarts by itself
-print-token guest --note "who"  a one-time guest key
+print-token guest --note "who"  a one-time guest key (--days N, or --until YYYY-MM-DD for its last day)
 print-token guests | revoke KEY | report --days 1 | tgtest | dryrun FILE
 print-token status | logs | restart
 ```
@@ -278,7 +278,7 @@ property is claimed.
 ```
 printtoken/   config.py store.py tokens.py pins.py mailparse.py policy.py convert.py notes.py printer.py
               pipeline.py telegram.py mailwatch.py messages.py report.py app.py __main__.py
-tests/        179 tests: tokens and guest keys, mail parsing and policy, the mailbox, conversion and
+tests/        181 tests: tokens and guest keys, mail parsing and policy, the mailbox, conversion and
               printing (Windows and CUPS), typed notes, blocking, the bot and the command line
 deploy/       the Raspberry Pi side: install-pi.sh, print-token.service, print-token (the command),
               print-token-wake.service and .timer (the wake-up alarm)

@@ -5,6 +5,7 @@ from conftest import make_mail
 
 from printtoken.config import Config
 from printtoken.mailwatch import Mailbox
+from printtoken.tokens import Tokens, Verdict, display_key
 
 
 class FakeIMAP:
@@ -156,3 +157,26 @@ def test_one_mail_that_fails_does_not_drop_the_rest_of_the_batch(tmp_path, store
     asyncio.run(watcher.check_once())
     assert handled == [6]
     assert store.query("SELECT reason, detail FROM events") == [("internal_error", "uid=5 IndexError")]
+
+
+def test_mail_from_the_mailbox_itself_is_explained_in_plain_words(tmp_path, store):
+    import asyncio
+    from printtoken.mailwatch import FetchedMail, MailWatcher
+    from printtoken.policy import RateLimiter
+
+    said = []
+
+    async def notify(text):
+        said.append(text)
+
+    tokens = Tokens(store)
+    tag, _ = tokens.mint_guest("tg:1", "prof", 7)
+    watcher = MailWatcher(cfg(tmp_path), store, tokens, pipeline=None, notify_owner=notify, limiter=RateLimiter(20))
+    own = make_mail(to="printbox+print@gmail.com", frm="Me <Print.Box@gmail.com>", auth=None, subject=display_key(tag))
+    asyncio.run(watcher.handle(FetchedMail(1, own, len(own), None, 0.0)))
+    assert len(said) == 1 and "print mailbox's own address" in said[0] and "another address" in said[0]
+    assert tokens.check(tag) is Verdict.OK                    # nothing was used up
+    other = make_mail(to="printbox+print@gmail.com", frm="x@example.com", auth=None, subject=display_key(tag))
+    asyncio.run(watcher.handle(FetchedMail(2, other, len(other), None, 0.0)))
+    assert "Gmail added no authentication result" in said[1] and "own address" not in said[1]
+    assert [r[0] for r in store.query("SELECT reason FROM events")] == ["dmarc_missing", "dmarc_missing"]
