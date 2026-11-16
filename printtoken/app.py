@@ -15,7 +15,7 @@ from .pipeline import Pipeline
 from .policy import RateLimiter
 from .printer import make_printer
 from .store import Store
-from .telegram import Bot, TelegramClient
+from .telegram import Bot, TelegramClient, TelegramError
 from .tokens import Tokens
 
 log = logging.getLogger("printtoken")
@@ -71,6 +71,25 @@ async def heartbeat(store: Store, every: float = 60) -> None:
         last = now
 
 
+async def wait_for_telegram(tg: TelegramClient, first_delay: float = 5, max_delay: float = 300,
+                            sleep=asyncio.sleep) -> dict:
+    """getMe, retried until Telegram answers. A machine that has just booted or woken up often has
+    no network yet, and one failed call must not end the gateway. A token Telegram rejects is a
+    setup mistake that waiting cannot fix, so that still stops it."""
+    delay = first_delay
+    while True:
+        try:
+            return await tg.call("getMe")
+        except TelegramError as exc:
+            if exc.code in (401, 403, 404):
+                raise
+            log.warning("Telegram answered %s at start, retrying in %.0fs", exc.code, delay)
+        except httpx.HTTPError as exc:
+            log.warning("Telegram not reachable at start (%s), retrying in %.0fs", exc.__class__.__name__, delay)
+        await sleep(delay)
+        delay = min(delay * 2, max_delay)
+
+
 async def run(cfg: Config) -> None:
     store = Store(cfg.data_dir / "printtoken.db")
     printer = make_printer(cfg.printer, cfg.data_dir / "dryrun")
@@ -86,7 +105,7 @@ async def run(cfg: Config) -> None:
     limiter = RateLimiter(cfg.prints_per_hour)
     async with httpx.AsyncClient() as client:
         tg = TelegramClient(cfg.bot_token, client)
-        me = await tg.call("getMe")
+        me = await wait_for_telegram(tg)
         pipeline = Pipeline(store, printer, cfg.page_cap, cfg.queue_size, cfg.workers)
         bot = Bot(cfg, tg, tokens, pins, pipeline, store, limiter)
         bot.username = me.get("username")       # for the t.me deep link in /invite
