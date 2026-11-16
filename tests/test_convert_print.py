@@ -145,3 +145,15 @@ def test_dryrun_small_image_is_not_blown_up(tmp_path):
     img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
     corner = img.getpixel((2, 2))
     assert corner == (255, 255, 255)                              # the page edges stay blank
+
+
+@pytest.mark.filterwarnings("ignore::PIL.Image.DecompressionBombWarning")
+def test_image_too_many_pixels_is_refused_before_decoding():
+    out = io.BytesIO()
+    Image.new("1", (13000, 13000)).save(out, "PNG")     # about 20 KB on disk, about 1 GB to convert
+    with pytest.raises(convert.Unsupported, match="too large"):
+        convert.to_pdf(out.getvalue())
+    out = io.BytesIO()
+    Image.new("1", (20000, 20000)).save(out, "PNG")     # past Pillow's own bomb limit
+    with pytest.raises(convert.Unsupported):
+        convert.to_pdf(out.getvalue())

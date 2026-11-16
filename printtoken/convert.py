@@ -18,6 +18,10 @@ FONT_SIZE, LINE_H = 10, 12
 CHARS_PER_LINE = 84                 # Courier 10pt is 6pt wide: 84 * 6 = 504 = 612 - 2 * 54
 LINES_PER_PAGE = (LETTER_H - 2 * MARGIN) // LINE_H
 MAX_TEXT_BYTES = 1024 * 1024        # plain text above this is thousands of pages, turned away unread
+# An image is checked by its size in pixels before it is decoded. A 20 KB PNG can declare 13000 x 13000
+# pixels and cost about 1 GB of memory to convert. 50 million still covers a 48 MP phone photo and
+# a 600 dpi scan of a Letter page (5100 x 6600).
+MAX_IMAGE_PIXELS = 50_000_000
 
 
 class Unsupported(Exception):
@@ -95,9 +99,14 @@ def _page_count(pdf: bytes) -> int:
 
 def _image_to_pdf(data: bytes) -> bytes:
     try:
-        img = Image.open(io.BytesIO(data))
+        img = Image.open(io.BytesIO(data))      # reads the header only, no pixels yet
+        width, height = img.size
+        if width * height > MAX_IMAGE_PIXELS:
+            raise Unsupported(f"the image is {width} x {height} pixels, too large to print")
         img.load()
-    except (UnidentifiedImageError, OSError) as exc:
+    except Unsupported:
+        raise
+    except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as exc:
         raise Unsupported("the image could not be opened") from exc
     # Phone cameras store the picture sideways and add an EXIF note saying "rotate me".
     # Without exif_transpose a portrait photo prints on its side.
