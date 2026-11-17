@@ -38,7 +38,8 @@ def make_png(size=(400, 300), color=(200, 30, 30)) -> bytes:
 def make_mail(to: str = f"{BASE}+abcdefgh@{DOMAIN}", frm: str = "Alice <alice@example.com>",
               auth: str | None = GOOD_AUTH, lower_auth: str | None = None,
               attachments=None, cc: str | None = None, delivered_to: str | None = None,
-              subject: str = "print this", body: str = "see attached", html: str | None = None) -> bytes:
+              subject: str = "print this", body: str = "see attached", html: str | None = None,
+              inline=None) -> bytes:
     msg = EmailMessage()
     if auth is not None:
         msg["Authentication-Results"] = auth          # Gmail puts its own header on top
@@ -53,7 +54,25 @@ def make_mail(to: str = f"{BASE}+abcdefgh@{DOMAIN}", frm: str = "Alice <alice@ex
     msg["Subject"] = subject
     msg["Date"] = formatdate(localtime=True)
     msg["Message-ID"] = "<test@example.com>"
-    if html is not None:
+    if inline:
+        # Pictures the text itself shows (a logo in a signature, a pasted screenshot), laid out the
+        # way Outlook and Gmail do it: multipart/related around the words, each picture an inline
+        # part with a Content-ID. A real attachment then goes outside of that, as below.
+        words = EmailMessage()
+        if html is not None:
+            words.set_content(html, subtype="html")
+        else:
+            words.set_content(body)
+            shown = "".join(f'<img src="cid:pic{i}">' for i in range(len(inline)))
+            words.add_alternative(f"<p>{body}</p>{shown}", subtype="html")
+        msg["MIME-Version"] = "1.0"
+        msg.make_related()
+        msg.attach(words)
+        for i, (name, ctype, data) in enumerate(inline):
+            main, sub = ctype.split("/")
+            msg.add_related(data, maintype=main, subtype=sub, filename=name, disposition="inline",
+                            cid=f"<pic{i}>")
+    elif html is not None:
         msg.set_content(html, subtype="html")        # a mail program that sends no plain text part
     else:
         msg.set_content(body)

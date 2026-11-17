@@ -23,7 +23,8 @@ REASON_TEXT = {
     "dmarc_temperror": "the sender check had a temporary error",
     "dmarc_permerror": "the sender's DMARC record is broken",
     "sender_not_allowlisted": "the sender is not on the allowlist",
-    "no_attachment": "the email had no attachment",
+    "no_attachment": ("the email had no attached file (a picture inside the text, like a logo in a "
+                      "signature, does not count)"),
     "too_many_attachments": "the email had more than 5 attachments",
     "oversize": "the file is too big",
     "unsupported_type": "the file type is not supported",

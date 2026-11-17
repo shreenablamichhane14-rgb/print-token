@@ -7,7 +7,7 @@ import time
 from datetime import datetime
 
 import pytest
-from conftest import BASE, DOMAIN, make_mail, make_pdf
+from conftest import BASE, DOMAIN, make_mail, make_pdf, make_png
 from test_bot import OWNER, PIN, STRANGER, FakePipeline, FakeTG, msg
 from test_mail import ACCEPT, parse
 
@@ -698,6 +698,29 @@ def test_guest_key_by_email_costs_nothing_until_a_printable_file_arrives(tokens)
     assert decide_mail(parse(make_mail(to=to_addr, auth=fail)), tokens, ACCEPT).reason == "dmarc_fail"
     assert tokens.check(tag) is Verdict.OK
     assert decide_mail(parse(make_mail(to=to_addr)), tokens, ACCEPT).ok
+
+
+def test_a_signature_logo_is_not_the_file_a_guest_sent(tmp_path, store, tokens):
+    """Mail built the way a college's Microsoft system builds it (44 real messages looked at): the
+    words, the signature's logo as an inline picture, and the file, when there is one, attached
+    outside of that. With the file forgotten, the logo would have been printed and the key spent."""
+    logo = [("image001.png", "image/png", make_png((200, 60)))]
+    bot, tg, pipeline = make_guest_bot(tmp_path, store, tokens, mail_enabled=True)
+    tag, _ = tokens.mint_guest("tg:1", "prof", 7)
+    watcher = MailWatcher(bot.cfg, store, tokens, pipeline, bot.notify_owner, RateLimiter(20))
+    request = dict(to=f"{BASE}+print@{DOMAIN}", subject=display_key(tag))
+    raw = make_mail(inline=logo, attachments=[], **request)                    # the file was forgotten
+    run(watcher.handle(FetchedMail(1, raw, len(raw), None, time.time())))
+    assert pipeline.queue.items == [] and tokens.check(tag) is Verdict.OK      # nothing printed, key still good
+    assert to(tg, OWNER) == ["Rejected an email from alice@example.com: the email had no attached file "
+                             "(a picture inside the text, like a logo in a signature, does not count)."]
+    pasted = logo + [("screenshot.png", "image/png", make_png((1200, 900)))]
+    raw = make_mail(inline=pasted, attachments=[], **request)                  # pasted into the text
+    assert decide_mail(parse(raw), tokens, ACCEPT).reason == "no_attachment"
+    raw = make_mail(inline=logo, **request)                                    # the logo and a real file
+    run(watcher.handle(FetchedMail(2, raw, len(raw), None, time.time())))
+    assert [job.filename for job in pipeline.queue.items] == ["doc.pdf"]
+    assert tokens.get(tag).state == "printing"
 
 
 def test_mail_watcher_queues_a_guest_job(tmp_path, store, tokens):

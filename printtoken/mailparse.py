@@ -179,8 +179,16 @@ def body_text(msg: EmailMessage, limit: int = BODY_TEXT_LIMIT) -> str:
 
 
 def attachments(msg: EmailMessage) -> list[Attachment]:
+    """The files that were attached. In a message that is multipart/related at the top, every part
+    after the first is a picture the text itself shows (a logo in a signature, a pasted
+    screenshot), and the email package hands those out as attachments too. They are not files to
+    print, so there only a part that says it is an attachment counts. Without this, a mail with a
+    signature logo and a forgotten file printed the logo and spent the guest's key."""
+    in_the_text = msg.get_content_type() == "multipart/related"
     out = []
     for part in msg.iter_attachments():
+        if in_the_text and part.get_content_disposition() != "attachment":
+            continue
         data = part.get_payload(decode=True) or b""
         out.append(Attachment(part.get_filename() or "attachment", part.get_content_type(), data))
     return out

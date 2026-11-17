@@ -1,3 +1,5 @@
+from email.message import EmailMessage
+
 from conftest import BASE, DOMAIN, GOOD_AUTH, make_mail, make_png
 
 from printtoken import mailparse
@@ -120,6 +122,24 @@ def test_attachment_types_come_through(tokens):
                                              ("b.bin", "application/octet-stream", b"%PDF-1.7 fake")])
     d = decide_mail(mail, tokens, ACCEPT)
     assert [f.filename for f in d.files] == ["a.png", "b.bin"]
+
+
+def test_pictures_inside_the_text_are_not_attachments():
+    """A logo in a signature travels as an inline part of a multipart/related message, and the
+    email package lists it with the attachments when nothing else is attached."""
+    logo = [("image001.png", "image/png", make_png((200, 60)))]
+    assert parse(make_mail(inline=logo, attachments=[])).attachments == []
+    assert parse(make_mail(inline=logo, attachments=[], html="<p>no plain text part</p>")).attachments == []
+    assert [a.filename for a in parse(make_mail(inline=logo)).attachments] == ["doc.pdf"]
+    # A part of such a message that says it is an attachment is still one.
+    flat = EmailMessage()
+    flat["To"] = f"{BASE}+abcdefgh@{DOMAIN}"
+    flat.set_content("<p>see attached</p>", subtype="html")
+    flat.add_related(make_png((200, 60)), maintype="image", subtype="png", filename="image001.png",
+                     disposition="inline", cid="<pic0>")
+    flat.add_related(b"%PDF-1.7 fake", maintype="application", subtype="pdf", filename="flat.pdf",
+                     disposition="attachment")
+    assert [a.filename for a in parse(flat.as_bytes()).attachments] == ["flat.pdf"]
 
 
 # --- small helpers ---------------------------------------------------------------------------
