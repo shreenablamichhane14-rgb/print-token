@@ -149,8 +149,8 @@ def _draw_page(dc, page, horz: int, vert: int, dpi: int) -> None:
 
 class CupsPrinter:
     """Linux backend for the Raspberry Pi. CUPS does the scaling (fit-to-page) and the driver work.
-    The commands it builds are covered by tests, and on the Pi it has printed into a throwaway CUPS
-    queue (2026-11-15); it has not driven the real printer yet."""
+    The commands it builds are covered by tests; on the Pi it printed into a throwaway CUPS queue
+    (2026-11-15) and its first page on the real printer the day after (README, "On the Raspberry Pi")."""
 
     def __init__(self, name: str, dryrun_dir: Path | None = None, run=subprocess.run):
         self.name = name

@@ -12,6 +12,7 @@ import asyncio
 import imaplib
 import logging
 import re
+import ssl
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -46,6 +47,29 @@ def internaldate_ts(value: bytes) -> float | None:
         return moment.timestamp() - offset
     except (ValueError, KeyError, IndexError):
         return None
+
+
+def tls_context() -> ssl.SSLContext:
+    """A context that checks the mail server's certificate and its name. imaplib's own default
+    (ssl._create_stdlib_context) checks neither, and then the app password would go to whoever
+    answers as the mail server."""
+    return ssl.create_default_context()
+
+
+def open_imap(host: str, timeout: float, connect=imaplib.IMAP4_SSL):
+    """Every IMAP connection the gateway makes is opened here, so every one checks the certificate."""
+    return connect(host, 993, ssl_context=tls_context(), timeout=timeout)
+
+
+def failure_text(exc: BaseException) -> str:
+    """The error class plus, when there are any, the words that came with it: 'abort (socket error:
+    EOF)' says the server hung up, 'abort' alone does not. imaplib's errors carry no password; the
+    one kind that quotes a raw line from the server (it could be mail text) is cut before the quote."""
+    words = " ".join(str(exc).split())
+    if "unexpected" in words:
+        words = words.split(":", 1)[0]
+    words = words[:100]
+    return f"{exc.__class__.__name__} ({words})" if words else exc.__class__.__name__
 
 
 def _first(values) -> bytes | None:
@@ -84,7 +108,7 @@ class Mailbox:
         self._key = f"imap:{cfg.imap_user.lower()}"
 
     def connect(self) -> None:
-        imap = self._connect(self.cfg.imap_host, 993, timeout=30)
+        imap = open_imap(self.cfg.imap_host, 30, connect=self._connect)
         imap.login(self.cfg.imap_user, self.cfg.imap_password)
         typ, _ = imap.select("INBOX", readonly=True)
         if typ != "OK":
@@ -134,17 +158,25 @@ class Mailbox:
         # "UID n:*" always includes the newest message, even when n is past it, so filter again.
         uids = sorted(u for u in (int(x) for x in (data[0] or b"").split()) if u > last_uid)
         found: list[FetchedMail] = []
-        for uid in uids:
-            typ, data = imap.uid("FETCH", str(uid), HEADER_FETCH)
-            meta, headers = _literal(data)
-            if typ == "OK" and headers:
-                msg = mailparse.parse_headers(headers)
-                # A +tag address (a one-time address, a guest key, or box+print@ with the key in
-                # the text), or a guest key in the subject of mail to the plain address.
-                if (mailparse.find_tags(msg, self.cfg.mail_local, self.cfg.mail_domain)
-                        or (self.cfg.guest_enabled and find_key(mailparse.subject_of(msg), bare=False))):
-                    found.append(self._fetch_body(imap, uid, meta))
-            self.store.kv_set(f"{self._key}:last_uid", uid)
+        try:
+            for uid in uids:
+                typ, data = imap.uid("FETCH", str(uid), HEADER_FETCH)
+                meta, headers = _literal(data)
+                if typ == "OK" and headers:
+                    msg = mailparse.parse_headers(headers)
+                    # A +tag address (a one-time address, a guest key, or box+print@ with the key in
+                    # the text), or a guest key in the subject of mail to the plain address.
+                    if (mailparse.find_tags(msg, self.cfg.mail_local, self.cfg.mail_domain)
+                            or (self.cfg.guest_enabled and find_key(mailparse.subject_of(msg), bare=False))):
+                        found.append(self._fetch_body(imap, uid, meta))
+                self.store.kv_set(f"{self._key}:last_uid", uid)
+        except (imaplib.IMAP4.abort, imaplib.IMAP4.error, OSError):
+            if not found:
+                raise
+            # The connection broke in the middle of a batch. The saved position is already past what
+            # was downloaded, so that must be handed over now or it is lost; the next check
+            # reconnects and goes on from the message that failed.
+            self.close()
         return found
 
     def _fetch_body(self, imap, uid: int, meta: bytes) -> FetchedMail:
@@ -176,7 +208,7 @@ class MailWatcher:
             try:
                 await self.check_once()
             except Exception as exc:
-                log.warning("mailbox check failed: %s", exc.__class__.__name__)
+                log.warning("mailbox check failed: %s", failure_text(exc))
             await asyncio.sleep(max(1.0, self.cfg.poll_seconds - (time.time() - started)))
 
     async def check_once(self) -> None:

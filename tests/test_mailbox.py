@@ -14,8 +14,11 @@ class FakeIMAP:
         self.uidvalidity = uidvalidity
         self._responses: dict[str, list] = {}
         self.body_fetches: list[int] = []
+        self.ssl_context = None
+        self.fail_at: int | None = None
 
-    def __call__(self, host, port, timeout=None):       # stands in for imaplib.IMAP4_SSL(...)
+    def __call__(self, host, port, ssl_context=None, timeout=None):     # stands in for imaplib.IMAP4_SSL(...)
+        self.ssl_context = ssl_context
         return self
 
     def login(self, user, password):
@@ -44,6 +47,9 @@ class FakeIMAP:
                 found = [top]                        # the real quirk: n:* past the end gives the newest
             return "OK", [" ".join(map(str, found)).encode()]
         uid, what = int(args[0]), args[1]
+        if uid == self.fail_at:                      # the connection dies when this message is asked for
+            import imaplib
+            raise imaplib.IMAP4.abort("socket error: EOF")
         raw = self.messages[uid]
         if "HEADER.FIELDS" in what:
             header = raw.split(b"\n\n", 1)[0] + b"\n\n"
@@ -180,3 +186,61 @@ def test_mail_from_the_mailbox_itself_is_explained_in_plain_words(tmp_path, stor
     asyncio.run(watcher.handle(FetchedMail(2, other, len(other), None, 0.0)))
     assert "Gmail added no authentication result" in said[1] and "own address" not in said[1]
     assert [r[0] for r in store.query("SELECT reason FROM events")] == ["dmarc_missing", "dmarc_missing"]
+
+
+# The saved position moves on message by message. If the connection broke in the middle of a batch
+# and the error simply went up, a print request downloaded just before the break would be dropped
+# for good: the position is already past it.
+def test_a_connection_that_breaks_mid_batch_keeps_what_was_already_downloaded(tmp_path, store):
+    import imaplib
+
+    server = FakeIMAP({1: OTHER})
+    box = Mailbox(cfg(tmp_path), store, connect=server)
+    box.fetch_new()
+    server.messages.update({2: TAGGED, 3: OTHER, 4: TAGGED})
+    server.fail_at = 3
+    assert [m.uid for m in box.fetch_new()] == [2]              # message 2 is handed over, not lost
+    assert store.kv_get("imap:printbox@gmail.com:last_uid") == "2"
+    with pytest.raises(imaplib.IMAP4.abort):                    # nothing in hand: the error goes up
+        box.fetch_new()
+    assert store.kv_get("imap:printbox@gmail.com:last_uid") == "2"
+    server.fail_at = None
+    assert [m.uid for m in box.fetch_new()] == [4]              # and the next check goes on from there
+    assert server.body_fetches == [2, 4]
+
+
+# imaplib.IMAP4_SSL checks no certificate unless it is handed a context that does (its default is
+# ssl._create_stdlib_context, which verifies nothing). Without one, the app password would go to
+# whoever answers as the mail server.
+def test_the_mailbox_checks_the_mail_servers_certificate(tmp_path, store):
+    import ssl
+
+    server = FakeIMAP({1: OTHER})
+    Mailbox(cfg(tmp_path), store, connect=server).fetch_new()
+    assert server.ssl_context is not None
+    assert server.ssl_context.verify_mode == ssl.CERT_REQUIRED and server.ssl_context.check_hostname is True
+
+
+def test_every_imap_connection_is_opened_with_a_checking_context():
+    import ssl
+    from printtoken.mailwatch import open_imap
+
+    seen = {}
+
+    def connect(host, port, ssl_context=None, timeout=None):
+        seen.update(host=host, port=port, context=ssl_context, timeout=timeout)
+        return "connection"
+
+    assert open_imap("imap.example", 20, connect=connect) == "connection"
+    assert (seen["host"], seen["port"], seen["timeout"]) == ("imap.example", 993, 20)
+    assert seen["context"].verify_mode == ssl.CERT_REQUIRED and seen["context"].check_hostname is True
+
+
+def test_a_failed_check_is_logged_with_the_servers_own_words():
+    import imaplib
+    from printtoken.mailwatch import failure_text
+
+    assert failure_text(imaplib.IMAP4.abort("socket error: EOF")) == "abort (socket error: EOF)"
+    assert failure_text(TimeoutError()) == "TimeoutError"
+    assert failure_text(OSError("line one\n   line two " + "x" * 300)).startswith("OSError (line one line two xxx")
+    assert len(failure_text(OSError("y" * 500))) < 140

@@ -20,7 +20,6 @@ import argparse
 import asyncio
 import getpass
 import hashlib
-import imaplib
 import os
 import sys
 import time
@@ -91,14 +90,15 @@ def cmd_selftest(args) -> int:
     except PrinterError as exc:
         result("printer installed", False, str(exc))
     if cfg.mail_enabled:
+        from .mailwatch import failure_text, open_imap
         try:
-            imap = imaplib.IMAP4_SSL(cfg.imap_host, 993, timeout=20)
+            imap = open_imap(cfg.imap_host, 20)         # checks the server's certificate
             imap.login(cfg.imap_user, cfg.imap_password)
             typ, data = imap.select("INBOX", readonly=True)
             imap.logout()
             result("mailbox login", typ == "OK", f"{data[0].decode()} messages")
         except Exception as exc:
-            result("mailbox login", False, exc.__class__.__name__)
+            result("mailbox login", False, failure_text(exc))
     else:
         print("  [SKIP] mailbox: email printing is turned off in config.toml")
     try:
