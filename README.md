@@ -99,7 +99,8 @@ issued.
 guest emails the file there from their own address, as an attachment, and pastes the key into the
 subject or the body (Gmail's `dmarc=pass` is still required; the sender allowlist is not applied
 to a guest key). One attachment, and no email comes back: the owner's Telegram gets the
-confirmation. Only the `PT-ABCD-EFGH-IJKL` form is read from text, so ordinary words are never
+confirmation. A picture that sits inside the text (a logo in a signature, a pasted screenshot) is
+not an attachment: such a mail is turned away and the key stays good. Only the `PT-ABCD-EFGH-IJKL` form is read from text, so ordinary words are never
 taken for a key. A key in the subject also works at the plain address, and the older form
 `box+<12 characters>@gmail.com` still works. Mail to the plain address is opened only when its
 subject carries a key; the body of other mail is never fetched. A key mid-print on one channel is
@@ -130,7 +131,7 @@ first: the expiry times in the messages use the machine's own time zone.
 
 Other commands: `dryrun [--note] FILE`, `mint` (local address, email testing),
 `guest [--days N] [--note TEXT]`, `guests`, `revoke KEY`, `report [--days N] [--csv out.csv]`.
-Tests: `python -m pytest -p no:faulthandler` (181 tests).
+Tests: `python -m pytest -p no:faulthandler` (187 tests).
 
 ## On the Raspberry Pi
 
@@ -223,6 +224,11 @@ in 0.67 s, SHA-256 match); a two page job through `CupsPrinter` into the throwaw
 23 s for the right time); and a clean shutdown with the power left on (the Pi woke itself after
 4.5 minutes and the gateway was running 37 s later).
 
+On 2026-11-16 the first page went through the Pi to the real printer: a JPEG mailed from a
+college mailbox (Microsoft 365) with a one-day guest key as the subject. Gmail's check said SPF,
+DKIM and DMARC pass, the gateway picked the mail up 9 s after it reached the inbox, and the job
+was out of the CUPS queue 49 s later; the printer's own job list (IPP) shows it completed.
+
 ## Pitfalls for whoever works on this next
 
 1. **Never print to the default printer.** Windows 10/11 can move the default to the last printer
@@ -264,11 +270,29 @@ in 0.67 s, SHA-256 match); a two page job through `CupsPrinter` into the throwaw
 20. **`MemoryMax=` in a systemd unit does nothing on a stock Raspberry Pi OS**, and says so
     nowhere: the kernel's memory controller is switched off until `cgroup_enable=memory` is in
     `/boot/firmware/cmdline.txt`. Check `/sys/fs/cgroup/cgroup.controllers`.
+21. **Python's `imaplib.IMAP4_SSL` checks no certificate by itself.** With no `ssl_context` it
+    encrypts, but verifies neither the certificate nor the server's name, so the app password
+    would go to whoever answers as the mail server. Every IMAP connection here goes through
+    `mailwatch.open_imap`, which hands it `ssl.create_default_context()`. Found on 2026-11-16,
+    after the code had passed a security review; checked against the real server (accepted by
+    name, refused by bare IP address).
+22. **A position saved message by message needs care when the connection breaks mid-batch.** The
+    mailbox position moves on after each new message, so mail already downloaded in that batch
+    has to be handed over before the error is raised, or a print request is dropped for good.
+    `Mailbox._fetch_new` returns what it has and lets the next check reconnect.
+23. **A logo in an email signature is a MIME part too.** In a message that is `multipart/related`
+    at the top, Python's `iter_attachments()` hands out the pictures the text shows (a signature
+    logo, a pasted screenshot) as attachments. A guest mail with a logo and a forgotten file would
+    have printed the logo and spent the key. `mailparse.attachments` counts only parts that say
+    `attachment` there. Found on 2026-11-17 by reading how real mail from an Outlook system is
+    built, before a guest used it; a file attached the normal way was never affected. Still open:
+    a mail program that lists its logo as a normal attachment ahead of the file.
 
 ## Threat model
 
 Defends against: a leaked address (expires, single use), forged email senders, replay (atomic
-burn), floods (bounded queue, rate limits, page cap), and anything inbound (nothing listens).
+burn), floods (bounded queue, rate limits, page cap), a machine in the middle posing as the mail
+server (its certificate is checked), and anything inbound (nothing listens).
 Does not defend against: a compromised gateway machine, someone with the Gmail or Telegram
 account, or Google and Telegram themselves. Documents pass through both services, so no privacy
 property is claimed.
@@ -278,7 +302,7 @@ property is claimed.
 ```
 printtoken/   config.py store.py tokens.py pins.py mailparse.py policy.py convert.py notes.py printer.py
               pipeline.py telegram.py mailwatch.py messages.py report.py app.py __main__.py
-tests/        181 tests: tokens and guest keys, mail parsing and policy, the mailbox, conversion and
+tests/        187 tests: tokens and guest keys, mail parsing and policy, the mailbox, conversion and
               printing (Windows and CUPS), typed notes, blocking, the bot and the command line
 deploy/       the Raspberry Pi side: install-pi.sh, print-token.service, print-token (the command),
               print-token-wake.service and .timer (the wake-up alarm)
@@ -287,6 +311,6 @@ data/         (git-ignored) printtoken.db, printtoken.log, dryrun/
 
 ## Not done yet
 
-Email switched on with its own Gmail account, a print on the real printer from the Pi (the CUPS
-path has run there only against a throwaway queue), Word/DOCX input, the attack tests and the
-uptime trial.
+A Gmail account of its own for the mailbox (it runs on the owner's account for now), a print on
+the real printer through the Telegram side (the email side has done one), Word/DOCX input, the
+attack tests and the uptime trial.
